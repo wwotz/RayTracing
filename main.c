@@ -27,12 +27,64 @@ FILE *ppm_out;
 #define VEC3(x, y, z)     ll_vec3_create3f(x, y, z)
 #define LENGTH_SQUARED(a) ll_vec3_length_squared3fv(a)
 
+static inline float
+degrees_to_radians(float degrees)
+{
+	return degrees * M_PI / 180.0;
+}
+
+static inline float
+random_float(void)
+{
+	return rand() / (RAND_MAX + 1.0);
+}
+
+static inline float
+random_float2f(float min, float max)
+{
+	return min + (max-min) * random_float();
+}
+
+typedef struct interval_t {
+	float min, max;
+} interval_t;
+
+static bool
+interval_contains(interval_t interval, double x);
+
+static bool
+interval_surrounds(interval_t interval, double x);
+
+#define INTERVAL(a, b) (interval_t) { a, b }
+
+const static interval_t empty    = INTERVAL(+INFINITY, -INFINITY);
+const static interval_t universe = INTERVAL(-INFINITY, +INFINITY);
+
 struct {
 	point_t origin;
 	vec3_t direction;
 } ray;
 
 #define RAY_AT(t) ADD(ray.origin, ll_vec3_mul1f(ray.direction, t))
+
+struct {
+	double aspect_ratio;
+	int image_width;
+	int image_height;
+	point_t center;
+	point_t pixel00_loc;
+	vec3_t pixel_delta_u;
+	vec3_t pixel_delta_v;
+} camera;
+
+static void
+camera_render(void);
+
+static void
+camera_initialize(void);
+
+static colour_t
+camera_ray_colour(void);
 
 typedef struct hit_record_t {
 	point_t p;
@@ -51,21 +103,19 @@ typedef struct sphere_t {
 	float radius;
 } sphere_t;
 
-
-
 typedef struct hittable_t {
 	obj_t type;
 	union {
 		struct sphere_t sphere;
 	} object;
-	bool (*hit)(struct hittable_t hittable, float ray_tmin,
-		    float ray_tmax, hit_record_t *hit_record);
+	bool (*hit)(struct hittable_t hittable, interval_t interval,
+		    hit_record_t *hit_record);
 } hittable_t;
 
 static hit_record_t hit_record;
 
 static bool
-sphere_hit(hittable_t sphere, float ray_tmin, float ray_tmax, hit_record_t *hit_record);
+sphere_hit(hittable_t sphere, interval_t ray_t, hit_record_t *hit_record);
 
 #define SPHERE(center, radius) (hittable_t) { OBJECT_SPHERE,		\
 			.object.sphere = (sphere_t) { center, radius }, .hit = sphere_hit } \
@@ -81,7 +131,7 @@ struct {
 static void
 hit_list_push_back(hittable_t hittable);
 static bool
-hit_list_hit(float ray_tmin, float ray_tmax);
+hit_list_hit(interval_t ray_t);
 
 static void
 set_face_normal(hit_record_t *rec, const vec3_t *outward_normal);
@@ -89,70 +139,32 @@ set_face_normal(hit_record_t *rec, const vec3_t *outward_normal);
 static void
 write_colour(colour_t colour);
 
-static colour_t
-ray_colour(void);
-
 static float
 hit_sphere(point_t center, float radius);
 
 int
 main(int argc, char **argv)
 {
-	int i, j;
-	char *progress_bar;
-	int image_width = IMAGE_WIDTH;
-	float aspect_ratio = ASPECT_RATIO;
-	int image_height = (int) (image_width / aspect_ratio);
-	image_height = (image_height < 1) ? 1 : image_height;
-
 	hit_list_push_back(SPHERE(POINT(0, 0, -1), 0.5));
 	hit_list_push_back(SPHERE(POINT(0, -100.5, -1), 100));
 
-	float focal_length = 1.0;
-	float viewport_height = 2.0;
-	float viewport_width = viewport_height
-		* (float) (image_width / (float) image_height);
-	point_t camera_center = POINT(0, 0, 0);
+	camera.image_width = IMAGE_WIDTH;
+	camera.aspect_ratio = ASPECT_RATIO;
 
-	vec3_t viewport_u = VEC3(viewport_width, 0, 0);
-	vec3_t viewport_v = VEC3(0, -viewport_height, 0);
-
-	vec3_t pixel_delta_u = ll_vec3_div1f(viewport_u, image_width);
-	vec3_t pixel_delta_v = ll_vec3_div1f(viewport_v, image_height);
-
-	vec3_t viewport_upper_left = SUB(SUB(SUB(camera_center, VEC3(0, 0, focal_length)),
-					     ll_vec3_div1f(viewport_u, 2)), ll_vec3_div1f(viewport_v, 2));
-	vec3_t pixel00_loc = ADD(viewport_upper_left,
-				 ll_vec3_div1f(ADD(pixel_delta_u, pixel_delta_v), 0.5));
-
-	progress_bar = malloc(image_height);
-	memset(progress_bar, '=', image_height);
-
-	ppm_out = fopen(PPM_PATH, "w");
-	if (!ppm_out) {
-		fprintf(stderr, "Failed to open '%s'\n", PPM_PATH);
-		exit(EXIT_FAILURE);
-	}
-	
-	fprintf(ppm_out, "P3\n%d %d\n255\n", image_width, image_height);
-	for (j = 0; j < image_height; j++) {
-		printf("\r%f: %.*s", ((j + 1) / (float) image_height) * 100.0,
-		       (int) (((j + 1) / (float) image_height) * 40),
-		       progress_bar);
-		for (i = 0; i < image_width; i++) {
-			point_t pixel_center = ADD(pixel00_loc, ADD(ll_vec3_mul1f(pixel_delta_u, i),
-								    ll_vec3_mul1f(pixel_delta_v, j)));
-			vec3_t ray_direction = SUB(pixel_center, camera_center);
-			
-			ray.origin = camera_center;
-			ray.direction = ray_direction;
-				
-			colour_t pixel_colour = ray_colour();
-			write_colour(pixel_colour);
-		}
-	}
-	printf("\nDone.\n");
+	camera_render();
 	return 0;
+}
+
+static bool 
+interval_contains(interval_t interval, double x)
+{
+	return interval.min <= x && x <= interval.max;
+}
+
+static bool
+interval_surrounds(interval_t interval, double x)
+{
+	return interval.min < x && x < interval.max;
 }
 
 static void
@@ -162,18 +174,6 @@ write_colour(colour_t colour)
 	int ig = (int) (255.999 * colour.g);
 	int ib = (int) (255.999 * colour.b);
 	fprintf(ppm_out, "%d %d %d\n", ir, ig, ib);
-}
-
-static colour_t
-ray_colour(void)
-{
-	if (hit_list_hit(0, INFINITY)) {
-		return ll_vec3_mul1f(ADD(hit_record.normal, COLOUR(1, 1, 1)), 0.5);
-	}
-	vec3_t unit_direction = ll_vec3_normalise3fv(ray.direction);
-	float a = 0.5 * (unit_direction.y + 1.0);
-	return ADD(ll_vec3_mul1f(COLOUR(1.0, 1.0, 1.0), (1.0-a)),
-		   ll_vec3_mul1f(COLOUR(0.5, 0.7, 1.0), a));
 }
 
 static void
@@ -203,17 +203,17 @@ hit_list_push_back(hittable_t hittable)
 }
 
 static bool
-hit_list_hit(float ray_tmin, float ray_tmax)
+hit_list_hit(interval_t ray_t)
 {
 	size_t i;
 	hit_record_t temp_rec;
 	bool hit_anything = false;
-	float closest_so_far = ray_tmax;
+	float closest_so_far = ray_t.max;
 	hittable_t hittable;
 
 	for (i = 0; i < hit_list.size; i++) {
 		hittable = hit_list.list[i];
-		if (hittable.hit(hittable, ray_tmin, closest_so_far, &temp_rec)) {
+		if (hittable.hit(hittable, INTERVAL(ray_t.min, closest_so_far), &temp_rec)) {
 			hit_anything = true;
 			closest_so_far = temp_rec.t;
 			hit_record = temp_rec;
@@ -232,7 +232,7 @@ set_face_normal(hit_record_t *rec, const vec3_t *outward_normal)
 }
 
 static bool
-sphere_hit(hittable_t sphere, float ray_tmin, float ray_tmax, hit_record_t *rec)
+sphere_hit(hittable_t sphere, interval_t ray_t, hit_record_t *rec)
 {
 	assert(sphere.type == OBJECT_SPHERE);
 	sphere_t object_sphere = sphere.object.sphere;
@@ -246,9 +246,9 @@ sphere_hit(hittable_t sphere, float ray_tmin, float ray_tmax, hit_record_t *rec)
 	float sqrtd = sqrt(discriminant);
 
 	float root = (-half_b - sqrtd) / a;
-	if (root <= ray_tmin || ray_tmax <= root) {
+	if (!interval_surrounds(ray_t, root)) {
 		root = (-half_b + sqrtd) / a;
-		if (root <= ray_tmin || ray_tmax <= root)
+		if (!interval_surrounds(ray_t, root))
 			return false;
 	}
 
@@ -260,7 +260,78 @@ sphere_hit(hittable_t sphere, float ray_tmin, float ray_tmax, hit_record_t *rec)
 	return true;
 }
 
+static void
+camera_render(void)
+{
+	int i, j;
+	char *progress_bar;
+	
+	camera_initialize();
+	
+	progress_bar = malloc(camera.image_height);
+	memset(progress_bar, '=', camera.image_height);
 
+	ppm_out = fopen(PPM_PATH, "w");
+	if (!ppm_out) {
+		fprintf(stderr, "Failed to open '%s'\n", PPM_PATH);
+		exit(EXIT_FAILURE);
+	}
+	
+	fprintf(ppm_out, "P3\n%d %d\n255\n", camera.image_width, camera.image_height);
+	for (j = 0; j < camera.image_height; j++) {
+		printf("\r%f: %.*s", ((j + 1) / (float) camera.image_height) * 100.0,
+		       (int) (((j + 1) / (float) camera.image_height) * 40),
+		       progress_bar);
+		for (i = 0; i < camera.image_width; i++) {
+			point_t pixel_center = ADD(camera.pixel00_loc, ADD(ll_vec3_mul1f(camera.pixel_delta_u, i),
+									   ll_vec3_mul1f(camera.pixel_delta_v, j)));
+			ray.origin = camera.center;
+			ray.direction = SUB(pixel_center, camera.center);
+				
+			colour_t pixel_colour = camera_ray_colour();
+			write_colour(pixel_colour);
+		}
+	}
+	printf("\nDone.\n");
+	free(progress_bar);
+}
+
+static void
+camera_initialize(void)
+{
+	camera.image_height = (int) (camera.image_width / camera.aspect_ratio);
+	camera.image_height = (camera.image_height < 1) ? 1 : camera.image_height;
+
+	camera.center = POINT(0, 0, 0);
+	float focal_length = 1.0;
+	float viewport_height = 2.0;
+	float viewport_width = viewport_height
+		* (float) (camera.image_width / (float) camera.image_height);
+
+	vec3_t viewport_u = VEC3(viewport_width, 0, 0);
+	vec3_t viewport_v = VEC3(0, -viewport_height, 0);
+
+	camera.pixel_delta_u = ll_vec3_div1f(viewport_u, camera.image_width);
+	camera.pixel_delta_v = ll_vec3_div1f(viewport_v, camera.image_height);
+
+	vec3_t viewport_upper_left = SUB(SUB(SUB(camera.center, VEC3(0, 0, focal_length)),
+					     ll_vec3_div1f(viewport_u, 2)), ll_vec3_div1f(viewport_v, 2));
+	camera.pixel00_loc = ADD(viewport_upper_left,
+				 ll_vec3_div1f(ADD(camera.pixel_delta_u,
+						   camera.pixel_delta_v), 0.5));
+}
+
+static colour_t
+camera_ray_colour(void)
+{
+	if (hit_list_hit(INTERVAL(0, INFINITY))) {
+		return ll_vec3_mul1f(ADD(hit_record.normal, COLOUR(1, 1, 1)), 0.5);
+	}
+	vec3_t unit_direction = ll_vec3_normalise3fv(ray.direction);
+	float a = 0.5 * (unit_direction.y + 1.0);
+	return ADD(ll_vec3_mul1f(COLOUR(1.0, 1.0, 1.0), (1.0-a)),
+		   ll_vec3_mul1f(COLOUR(0.5, 0.7, 1.0), a));
+}
 
 
 
