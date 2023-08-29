@@ -11,7 +11,7 @@
 typedef vec3_t colour_t;
 typedef vec3_t point_t;
 
-#define IMAGE_WIDTH  400
+#define IMAGE_WIDTH  800
 #define ASPECT_RATIO 16.0 / 9.0
 
 #define PPM_PATH "output.ppm"
@@ -44,6 +44,42 @@ random_float2f(float min, float max)
 {
 	return min + (max-min) * random_float();
 }
+
+#define RANDOMVEC3() VEC3(random_float(), random_float(), random_float())
+#define RANDOMVEC32f(min, max) VEC3(random_float2f(min, max), random_float2f(min, max), \
+				    random_float2f(min, max))
+
+static inline vec3_t
+random_in_unit_sphere(void)
+{
+	while (true) {
+		vec3_t p = RANDOMVEC32f(-1, 1);
+		if (LENGTH_SQUARED(p) < 1)
+			return p;
+	}
+}
+
+static inline vec3_t
+random_unit_vector(void)
+{
+	return ll_vec3_normalise3fv(random_in_unit_sphere());
+}
+
+static inline vec3_t
+random_on_hemisphere(vec3_t normal)
+{
+	vec3_t on_unit_sphere = random_unit_vector();
+	if (DOT(on_unit_sphere, normal) > 0.0)
+		return on_unit_sphere;
+	return ll_vec3_mul1f(on_unit_sphere, -1.0);
+}
+
+static inline float
+linear_to_gamma(float linear_component)
+{
+	return sqrt(linear_component);
+}
+
 
 typedef struct interval_t {
 	float min, max;
@@ -80,6 +116,7 @@ struct {
 	vec3_t pixel_delta_u;
 	vec3_t pixel_delta_v;
 	int samples_per_pixel;
+	int max_depth;
 } camera;
 
 static void
@@ -89,7 +126,7 @@ static void
 camera_initialize(void);
 
 static colour_t
-camera_ray_colour(ray_t ray);
+camera_ray_colour(ray_t ray, int depth);
 
 static ray_t
 camera_get_ray(int i, int j);
@@ -162,6 +199,7 @@ main(int argc, char **argv)
 	camera.image_width = IMAGE_WIDTH;
 	camera.aspect_ratio = ASPECT_RATIO;
 	camera.samples_per_pixel = 100;
+	camera.max_depth = 50;
 
 	camera_render();
 	return 0;
@@ -194,10 +232,14 @@ write_colour(colour_t colour, int samples_per_pixel)
 	float g = colour.g;
 	float b = colour.b;
 
-	float scale = 1.0 / samples_per_pixel;
+	float scale = 1.0 / (float) samples_per_pixel;
 	r *= scale;
 	g *= scale;
 	b *= scale;
+
+	r = linear_to_gamma(r);
+	g = linear_to_gamma(g);
+	b = linear_to_gamma(b);
 
 	static const interval_t intensity = INTERVAL(0.000, 0.999);
 	fprintf(ppm_out, "%d %d %d\n",
@@ -318,7 +360,7 @@ camera_render(void)
 			colour_t pixel_colour = COLOUR(0, 0, 0);
 			for (sample = 0; sample < camera.samples_per_pixel; ++sample) {
 				ray_t r = camera_get_ray(i, j);
-				pixel_colour = ADD(pixel_colour, camera_ray_colour(r));
+				pixel_colour = ADD(pixel_colour, camera_ray_colour(r, camera.max_depth));
 			}
 			write_colour(pixel_colour, camera.samples_per_pixel);
 		}
@@ -354,10 +396,15 @@ camera_initialize(void)
 }
 
 static colour_t
-camera_ray_colour(ray_t ray)
+camera_ray_colour(ray_t ray, int depth)
 {
-	if (hit_list_hit(ray, INTERVAL(0, INFINITY))) {
-		return ll_vec3_mul1f(ADD(hit_record.normal, COLOUR(1, 1, 1)), 0.5);
+	if (depth <= 0)
+		return COLOUR(0, 0, 0);
+	
+	if (hit_list_hit(ray, INTERVAL(0.001, INFINITY))) {
+		vec3_t direction = ADD(hit_record.normal, random_unit_vector());
+		//return ll_vec3_mul1f(ADD(hit_record.normal, COLOUR(1, 1, 1)), 0.5);
+		return ll_vec3_mul1f(camera_ray_colour(RAY(hit_record.p, direction), depth - 1), 0.5);
 	}
 	vec3_t unit_direction = ll_vec3_normalise3fv(ray.direction);
 	float a = 0.5 * (unit_direction.y + 1.0);
