@@ -1,1 +1,4 @@
-# Ray Tracing - Following from `Ray Tracing In One Weekend`
+# Ray Tracing Tutorial in C
+
+[! Image 1](./images/image1.ppm)
+

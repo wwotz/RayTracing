@@ -22,6 +22,7 @@ FILE *ppm_out;
 #define DOT(a, b)         ll_vec3_dot3fv(a, b)
 #define SUB(a, b)         ll_vec3_sub3fv(a, b)
 #define ADD(a, b)         ll_vec3_add3fv(a, b)
+#define MUL(a, b)         ll_vec3_mul3fv(a, b)
 #define COLOUR(r, g, b)   ll_vec3_create3f(r, g, b)
 #define POINT(x, y, z)    ll_vec3_create3f(x, y, z)
 #define VEC3(x, y, z)     ll_vec3_create3f(x, y, z)
@@ -74,12 +75,24 @@ random_on_hemisphere(vec3_t normal)
 	return ll_vec3_mul1f(on_unit_sphere, -1.0);
 }
 
+static vec3_t
+reflect(vec3_t v, vec3_t n)
+{
+	return SUB(v, ll_vec3_mul1f(ll_vec3_mul1f(n, DOT(v, n)), 2));
+}
+
 static inline float
 linear_to_gamma(float linear_component)
 {
 	return sqrt(linear_component);
 }
 
+static inline bool
+near_zero(vec3_t v)
+{
+	float s = 1e-8;
+	return (fabs(v.x) < s) && (fabs(v.y) < s) && (fabs(v.z) < s);
+}
 
 typedef struct interval_t {
 	float min, max;
@@ -134,9 +147,51 @@ camera_get_ray(int i, int j);
 static vec3_t
 camera_pixel_sample_square(void);
 
+typedef struct hit_record_t hit_record_t;
+
+typedef enum mat_t {
+	MATERIAL_LAMBERTIAN,
+	MATERIAL_METAL,
+	MATERIAL_COUNT,
+} mat_t;
+
+typedef struct lambertian_t {
+	colour_t albedo;
+} lambertian_t;
+
+typedef struct metal_t {
+	colour_t albedo;
+} metal_t;
+
+typedef struct material_t {
+	mat_t type;
+	union {
+		lambertian_t lambertian;
+		metal_t metal;
+	} surface;
+	bool (*scatter)(struct material_t material, ray_t ray, struct hit_record_t *hit_record,
+			colour_t *attenuation, ray_t *scattered);
+} material_t;
+
+static bool
+lambertian_scatter(struct material_t material, ray_t ray, struct hit_record_t *hit_record,
+		   colour_t *attenuation, ray_t *scattered);
+
+static bool
+metal_scatter(struct material_t material, ray_t ray, struct hit_record_t *hit_record,
+		   colour_t *attenuation, ray_t *scattered);
+
+#define LAMBERTIAN_MATERIAL(colour) (material_t) { .type = MATERIAL_LAMBERTIAN,	\
+			.surface.lambertian = (lambertian_t) { colour }, .scatter = lambertian_scatter}
+
+#define METAL_MATERIAL(colour) (material_t) { .type = MATERIAL_METAL,	\
+			.surface.metal = (metal_t) { colour }, .scatter = metal_scatter} 
+
+
 typedef struct hit_record_t {
 	point_t p;
 	vec3_t normal;
+	material_t mat;
 	float t;
 	bool front_face;
 } hit_record_t;
@@ -149,6 +204,7 @@ typedef enum obj_t {
 typedef struct sphere_t {
 	point_t center;
 	float radius;
+	material_t mat;
 } sphere_t;
 
 typedef struct hittable_t {
@@ -165,8 +221,8 @@ static hit_record_t hit_record;
 static bool
 sphere_hit(ray_t ray, hittable_t sphere, interval_t ray_t, hit_record_t *hit_record);
 
-#define SPHERE(center, radius) (hittable_t) { OBJECT_SPHERE,		\
-			.object.sphere = (sphere_t) { center, radius }, .hit = sphere_hit } \
+#define SPHERE(center, radius, mat) (hittable_t) { OBJECT_SPHERE,	\
+			.object.sphere = (sphere_t) { center, radius, mat }, .hit = sphere_hit } \
 	
 struct {
 	size_t size;
@@ -193,8 +249,15 @@ hit_sphere(point_t center, float radius);
 int
 main(int argc, char **argv)
 {
-	hit_list_push_back(SPHERE(POINT(0, 0, -1), 0.5));
-	hit_list_push_back(SPHERE(POINT(0, -100.5, -1), 100));
+	material_t material_ground = LAMBERTIAN_MATERIAL(COLOUR(0.8, 0.8, 0.0));
+	material_t material_center = LAMBERTIAN_MATERIAL(COLOUR(0.7, 0.3, 0.3));
+	material_t material_left = METAL_MATERIAL(COLOUR(0.8, 0.8, 0.8));
+	material_t material_right = METAL_MATERIAL(COLOUR(0.8, 0.6, 0.2));
+
+	hit_list_push_back(SPHERE(POINT(0, -100.5, -1), 100, material_ground));
+	hit_list_push_back(SPHERE(POINT(0, 0, -1), 0.5, material_center));
+	hit_list_push_back(SPHERE(POINT(-1, 0, -1), 0.5, material_left));
+	hit_list_push_back(SPHERE(POINT(1, 0, -1), 0.5, material_right));
 
 	camera.image_width = IMAGE_WIDTH;
 	camera.aspect_ratio = ASPECT_RATIO;
@@ -329,6 +392,7 @@ sphere_hit(ray_t ray, hittable_t sphere, interval_t ray_t, hit_record_t *rec)
 	vec3_t outward_normal = ll_vec3_div1f(SUB(rec->p, object_sphere.center),
 					      object_sphere.radius);
 	set_face_normal(ray, rec, &outward_normal);
+	rec->mat = object_sphere.mat;
 	return true;
 }
 
@@ -402,9 +466,12 @@ camera_ray_colour(ray_t ray, int depth)
 		return COLOUR(0, 0, 0);
 	
 	if (hit_list_hit(ray, INTERVAL(0.001, INFINITY))) {
-		vec3_t direction = ADD(hit_record.normal, random_unit_vector());
-		//return ll_vec3_mul1f(ADD(hit_record.normal, COLOUR(1, 1, 1)), 0.5);
-		return ll_vec3_mul1f(camera_ray_colour(RAY(hit_record.p, direction), depth - 1), 0.5);
+		ray_t scattered;
+		colour_t attenuation;
+		if (hit_record.mat.scatter(hit_record.mat, ray, &hit_record, &attenuation, &scattered)) {
+			return MUL(attenuation, camera_ray_colour(scattered, depth - 1));
+		}
+		return COLOUR(0, 0, 0);
 	}
 	vec3_t unit_direction = ll_vec3_normalise3fv(ray.direction);
 	float a = 0.5 * (unit_direction.y + 1.0);
@@ -433,6 +500,32 @@ camera_pixel_sample_square(void)
 	float py = -0.5 + random_float();
 	return ADD(ll_vec3_mul1f(camera.pixel_delta_u, px),
 		   ll_vec3_mul1f(camera.pixel_delta_v, py));
+}
+
+static bool
+lambertian_scatter(struct material_t material, ray_t ray, struct hit_record_t *hit_record,
+		   colour_t *attenuation, ray_t *scattered)
+{
+	assert(material.type == MATERIAL_LAMBERTIAN);
+	lambertian_t lambertian = material.surface.lambertian;
+	vec3_t scatter_direction = ADD(hit_record->normal, random_unit_vector());
+	if (near_zero(scatter_direction))
+		scatter_direction = hit_record->normal;
+	*scattered = RAY(hit_record->p, scatter_direction);
+	*attenuation = lambertian.albedo;
+	return true;
+}
+
+static bool
+metal_scatter(struct material_t material, ray_t ray, struct hit_record_t *hit_record,
+		   colour_t *attenuation, ray_t *scattered)
+{
+	assert(material.type == MATERIAL_METAL);
+	metal_t metal = material.surface.metal;
+	vec3_t reflected = reflect(ll_vec3_normalise3fv(ray.direction), hit_record->normal);
+	*scattered = RAY(hit_record->p, reflected);
+	*attenuation = metal.albedo;
+	return true;
 }
 
 
