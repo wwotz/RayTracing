@@ -75,10 +75,19 @@ random_on_hemisphere(vec3_t normal)
 	return ll_vec3_mul1f(on_unit_sphere, -1.0);
 }
 
-static vec3_t
+static inline vec3_t
 reflect(vec3_t v, vec3_t n)
 {
 	return SUB(v, ll_vec3_mul1f(ll_vec3_mul1f(n, DOT(v, n)), 2));
+}
+
+static inline vec3_t
+refract(vec3_t uv, vec3_t n, float etai_over_etat)
+{
+	float cos_theta = fmin(DOT(ll_vec3_mul1f(uv, -1), n), 1.0);
+	vec3_t r_out_perp = ll_vec3_mul1f(ADD(ll_vec3_mul1f(n, cos_theta), uv), etai_over_etat);
+	vec3_t r_out_parallel = ll_vec3_mul1f(n, -sqrt(fabs(1.0 - LENGTH_SQUARED(r_out_perp))));
+	return ADD(r_out_perp, r_out_parallel);
 }
 
 static inline float
@@ -130,6 +139,12 @@ struct {
 	vec3_t pixel_delta_v;
 	int samples_per_pixel;
 	int max_depth;
+	
+	float vfov;
+	point_t lookfrom;
+	point_t lookat;
+	vec3_t vup;
+	vec3_t u, v, w;
 } camera;
 
 static void
@@ -152,6 +167,7 @@ typedef struct hit_record_t hit_record_t;
 typedef enum mat_t {
 	MATERIAL_LAMBERTIAN,
 	MATERIAL_METAL,
+	MATERIAL_DIELECTRIC,
 	MATERIAL_COUNT,
 } mat_t;
 
@@ -161,13 +177,19 @@ typedef struct lambertian_t {
 
 typedef struct metal_t {
 	colour_t albedo;
+	float fuzz;
 } metal_t;
+
+typedef struct dielectric_t {
+	float ir;
+} dielectric_t;
 
 typedef struct material_t {
 	mat_t type;
 	union {
 		lambertian_t lambertian;
 		metal_t metal;
+		dielectric_t dielectric;
 	} surface;
 	bool (*scatter)(struct material_t material, ray_t ray, struct hit_record_t *hit_record,
 			colour_t *attenuation, ray_t *scattered);
@@ -181,11 +203,21 @@ static bool
 metal_scatter(struct material_t material, ray_t ray, struct hit_record_t *hit_record,
 		   colour_t *attenuation, ray_t *scattered);
 
+static bool
+dielectric_scatter(struct material_t material, ray_t ray, struct hit_record_t *hit_record,
+		   colour_t *attenuation, ray_t *scattered);
+
+static float
+reflectance(float cosine, float ref_idx);
+
 #define LAMBERTIAN_MATERIAL(colour) (material_t) { .type = MATERIAL_LAMBERTIAN,	\
 			.surface.lambertian = (lambertian_t) { colour }, .scatter = lambertian_scatter}
 
-#define METAL_MATERIAL(colour) (material_t) { .type = MATERIAL_METAL,	\
-			.surface.metal = (metal_t) { colour }, .scatter = metal_scatter} 
+#define METAL_MATERIAL(colour, f) (material_t) { .type = MATERIAL_METAL,	\
+			.surface.metal = (metal_t) { colour, f < 1 ? f : 1 }, .scatter = metal_scatter}
+
+#define DIELECTRIC_MATERIAL(ir) (material_t) { .type = MATERIAL_DIELECTRIC,	\
+			.surface.dielectric = (dielectric_t) { ir }, .scatter = dielectric_scatter} 
 
 
 typedef struct hit_record_t {
@@ -250,19 +282,24 @@ int
 main(int argc, char **argv)
 {
 	material_t material_ground = LAMBERTIAN_MATERIAL(COLOUR(0.8, 0.8, 0.0));
-	material_t material_center = LAMBERTIAN_MATERIAL(COLOUR(0.7, 0.3, 0.3));
-	material_t material_left = METAL_MATERIAL(COLOUR(0.8, 0.8, 0.8));
-	material_t material_right = METAL_MATERIAL(COLOUR(0.8, 0.6, 0.2));
+	material_t material_center = LAMBERTIAN_MATERIAL(COLOUR(0.1, 0.2, 0.5));
+	material_t material_left = DIELECTRIC_MATERIAL(1.4);
+	material_t material_right = LAMBERTIAN_MATERIAL(COLOUR(0, 0, 1));
 
 	hit_list_push_back(SPHERE(POINT(0, -100.5, -1), 100, material_ground));
 	hit_list_push_back(SPHERE(POINT(0, 0, -1), 0.5, material_center));
-	hit_list_push_back(SPHERE(POINT(-1, 0, -1), 0.5, material_left));
+	hit_list_push_back(SPHERE(POINT(-1, 0, -1), -0.4, material_left));
 	hit_list_push_back(SPHERE(POINT(1, 0, -1), 0.5, material_right));
-
+	
 	camera.image_width = IMAGE_WIDTH;
 	camera.aspect_ratio = ASPECT_RATIO;
 	camera.samples_per_pixel = 100;
 	camera.max_depth = 50;
+	
+	camera.vfov = 20;
+	camera.lookfrom = VEC3(-2, 2, 1);
+	camera.lookat = VEC3(0, 0, -1);
+	camera.vup = VEC3(0, 1, 0);
 
 	camera_render();
 	return 0;
@@ -440,19 +477,25 @@ camera_initialize(void)
 	camera.image_height = (camera.image_height < 1) ? 1 : camera.image_height;
 	
 
-	camera.center = POINT(0, 0, 0);
-	float focal_length = 1.0;
-	float viewport_height = 2.0;
+	camera.center = camera.lookfrom;
+	float focal_length = ll_vec3_length3fv(SUB(camera.lookfrom, camera.lookat));
+	float theta = degrees_to_radians(camera.vfov);
+	float h = tan(theta/2);
+	float viewport_height = 2 * h * focal_length;
 	float viewport_width = viewport_height
 		* (float) (camera.image_width / (float) camera.image_height);
 
-	vec3_t viewport_u = VEC3(viewport_width, 0, 0);
-	vec3_t viewport_v = VEC3(0, -viewport_height, 0);
+	camera.w = ll_vec3_normalise3fv(SUB(camera.lookfrom, camera.lookat));
+	camera.u = ll_vec3_normalise3fv(CROSS(camera.vup, camera.w));
+	camera.v = CROSS(camera.w, camera.u);
+
+	vec3_t viewport_u = ll_vec3_mul1f(camera.u, viewport_width);
+	vec3_t viewport_v = ll_vec3_mul1f(camera.v, -viewport_height);
 
 	camera.pixel_delta_u = ll_vec3_div1f(viewport_u, camera.image_width);
 	camera.pixel_delta_v = ll_vec3_div1f(viewport_v, camera.image_height);
 
-	vec3_t viewport_upper_left = SUB(SUB(SUB(camera.center, VEC3(0, 0, focal_length)),
+	vec3_t viewport_upper_left = SUB(SUB(SUB(camera.center, ll_vec3_mul1f(camera.w, focal_length)),
 					     ll_vec3_div1f(viewport_u, 2)), ll_vec3_div1f(viewport_v, 2));
 	camera.pixel00_loc = ADD(viewport_upper_left,
 				 ll_vec3_div1f(ADD(camera.pixel_delta_u,
@@ -523,10 +566,45 @@ metal_scatter(struct material_t material, ray_t ray, struct hit_record_t *hit_re
 	assert(material.type == MATERIAL_METAL);
 	metal_t metal = material.surface.metal;
 	vec3_t reflected = reflect(ll_vec3_normalise3fv(ray.direction), hit_record->normal);
-	*scattered = RAY(hit_record->p, reflected);
+	*scattered = RAY(hit_record->p, ADD(reflected, ll_vec3_mul1f(random_unit_vector(), metal.fuzz)));
 	*attenuation = metal.albedo;
 	return true;
 }
+
+static bool
+dielectric_scatter(struct material_t material, ray_t ray, struct hit_record_t *hit_record,
+		   colour_t *attenuation, ray_t *scattered)
+{
+	assert(material.type == MATERIAL_DIELECTRIC);
+	dielectric_t dielectric = material.surface.dielectric;
+	*attenuation = COLOUR(1, 1, 1);
+	float refraction_ratio = hit_record->front_face ? (1.0/dielectric.ir) : dielectric.ir;
+
+	vec3_t unit_direction = ll_vec3_normalise3fv(ray.direction);
+	float cos_theta = fmin(DOT(ll_vec3_mul1f(unit_direction, -1), hit_record->normal), 1.0);
+	float sin_theta = sqrt(1.0 - cos_theta*cos_theta);
+
+	bool cannot_refract = refraction_ratio * sin_theta > 1.0;
+	vec3_t direction;
+
+	if (cannot_refract || reflectance(cos_theta, refraction_ratio) > random_float()) {
+		direction = reflect(unit_direction, hit_record->normal);
+	} else {
+		direction = refract(unit_direction, hit_record->normal, refraction_ratio);
+	}
+
+	*scattered = RAY(hit_record->p, direction);
+	return true;
+}
+
+static float
+reflectance(float cosine, float ref_idx)
+{
+	float r0 = (1 - ref_idx) / (1 + ref_idx);
+	r0 = r0 * r0;
+	return r0 + (1 - r0) * pow((1 - cosine), 5);
+}
+
 
 
 
