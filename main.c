@@ -11,7 +11,7 @@
 typedef vec3_t colour_t;
 typedef vec3_t point_t;
 
-#define IMAGE_WIDTH  200
+#define IMAGE_WIDTH  800
 #define ASPECT_RATIO 16.0 / 9.0
 
 #define PPM_PATH "output.ppm"
@@ -181,6 +181,45 @@ aabb_axis(aabb_t aabb, int n);
 static bool
 aabb_hit(aabb_t aabb, ray_t ray, interval_t ray_t);
 
+typedef struct solid_colour_t {
+	colour_t colour;
+} solid_colour_t;
+
+typedef struct checkered_t {
+	float inv_scale;
+	struct texture_t *even;
+	struct texture_t *odd;
+} checkered_t;
+
+typedef struct texture_t {
+	enum {
+		TEXTURE_SOLID_COLOUR,
+		TEXTURE_CHECKERED,
+		TEXTURE_COUNT,
+	} type;
+
+	union {
+		struct solid_colour_t solid_colour;
+		struct checkered_t checkered;
+	} surface;
+
+	colour_t (*value)(struct texture_t *texture, float u, float v, point_t p);
+} texture_t;
+
+static texture_t *
+solid_colour_create3f(float r, float g, float b);
+
+static colour_t
+solid_colour_value(texture_t *texture, float u, float v, point_t p);
+
+static texture_t *
+checkered_create(float scale, texture_t *even, texture_t *odd);
+
+static texture_t *
+checkered_create2v(float scale, colour_t c1, colour_t c2);
+
+static colour_t
+checkered_value(texture_t *texture, float u, float v, point_t p);
 
 typedef struct hit_record_t hit_record_t;
 
@@ -192,7 +231,7 @@ typedef enum mat_t {
 } mat_t;
 
 typedef struct lambertian_t {
-	colour_t albedo;
+	struct texture_t *albedo;
 } lambertian_t;
 
 typedef struct metal_t {
@@ -211,20 +250,23 @@ typedef struct material_t {
 		metal_t metal;
 		dielectric_t dielectric;
 	} surface;
-	bool (*scatter)(struct material_t material, ray_t ray, struct hit_record_t *hit_record,
+	bool (*scatter)(struct material_t *material, ray_t ray, struct hit_record_t *hit_record,
 			colour_t *attenuation, ray_t *scattered);
 } material_t;
 
+static material_t *
+lambertian_create(texture_t *texture);
+
 static bool
-lambertian_scatter(struct material_t material, ray_t ray, struct hit_record_t *hit_record,
+lambertian_scatter(struct material_t *material, ray_t ray, struct hit_record_t *hit_record,
 		   colour_t *attenuation, ray_t *scattered);
 
 static bool
-metal_scatter(struct material_t material, ray_t ray, struct hit_record_t *hit_record,
+metal_scatter(struct material_t *material, ray_t ray, struct hit_record_t *hit_record,
 		   colour_t *attenuation, ray_t *scattered);
 
 static bool
-dielectric_scatter(struct material_t material, ray_t ray, struct hit_record_t *hit_record,
+dielectric_scatter(struct material_t *material, ray_t ray, struct hit_record_t *hit_record,
 		   colour_t *attenuation, ray_t *scattered);
 
 static float
@@ -243,8 +285,10 @@ reflectance(float cosine, float ref_idx);
 typedef struct hit_record_t {
 	point_t p;
 	vec3_t normal;
-	material_t mat;
+	material_t *mat;
 	float t;
+	float u;
+	float v;
 	bool front_face;
 } hit_record_t;
 
@@ -259,7 +303,7 @@ typedef enum obj_t {
 typedef struct sphere_t {
 	point_t center1;
 	float radius;
-	material_t mat;
+	material_t *mat;
 	bool is_moving;
 	vec3_t center_vec;
 	aabb_t bbox;
@@ -283,10 +327,10 @@ typedef struct hittable_t {
 } hittable_t;
 
 static hittable_t *
-sphere_create(point_t center1, float radius, material_t mat);
+sphere_create(point_t center1, float radius, material_t *mat);
 
 static hittable_t *
-sphere_move_create(point_t center1, point_t center2, float radius, material_t mat);
+sphere_move_create(point_t center1, point_t center2, float radius, material_t *mat);
 
 static bool
 sphere_hit(ray_t ray, hittable_t *sphere, interval_t ray_t, hit_record_t *hit_record);
@@ -295,6 +339,16 @@ static point_t
 sphere_center(sphere_t sphere, float time)
 {
 	return ADD(sphere.center1, ll_vec3_mul1f(sphere.center_vec, time));
+}
+
+static void
+get_sphere_uv(point_t p, float *u, float *v)
+{
+	float theta = acos(-p.y);
+	float phi = atan2(-p.z, p.x) + M_PI;
+
+	*u = phi / (2*M_PI);
+	*v = theta / M_PI;
 }
 
 static aabb_t
@@ -430,46 +484,47 @@ internal_box_z_compare(const void *a, const void *b)
 	return box_z_compare(a_, b_);
 }
 
-int
-main(int argc, char **argv)
+static void
+random_spheres(void)
 {
-	material_t material_ground = LAMBERTIAN_MATERIAL(COLOUR(0.5, 0.5, 0.5));
+	texture_t *checkered = checkered_create2v(0.8, COLOUR(.2, .3, .1), COLOUR(.9, .9, .9));
+	material_t *material_ground = lambertian_create(checkered);
 	hit_list_push_back(&world, sphere_create(POINT(0, -1000, 0), 1000, material_ground));
 	
-	for (int a = -11; a < 11; a++) {
-		for (int b = -11; b < 11; b++) {
-			float choose_mat = random_float();
-			point_t center = POINT(a + 0.9*random_float(), 0.2, b + 0.9*random_float());
+	//for (int a = -11; a < 11; a++) {
+	//	for (int b = -11; b < 11; b++) {
+	//		float choose_mat = random_float();
+	//		point_t center = POINT(a + 0.9*random_float(), 0.2, b + 0.9*random_float());
+	//
+	//		if (ll_vec3_length3fv(SUB(center, POINT(4, 0.2, 0))) > 0.9) {
+	//			material_t sphere_material;
+	//
+	//			if (choose_mat < 0.0) {
+	//				vec3_t albedo = RANDOMVEC3();
+	//				sphere_material = LAMBERTIAN_MATERIAL(albedo);
+	//				hit_list_push_back(&world, sphere_create(center, 0.2,
+	//							  sphere_material));
+	//			} else if (choose_mat < 0.95) {
+	//				vec3_t albedo = RANDOMVEC32f(0.5, 1);
+	//				float fuzz = random_float2f(0, 0.5);
+	//				sphere_material = METAL_MATERIAL(albedo, fuzz);
+	//				hit_list_push_back(&world, sphere_create(center, 0.2,
+	//							  sphere_material));
+	//			} else {
+	//				sphere_material = DIELECTRIC_MATERIAL(1.5);
+	//				hit_list_push_back(&world, sphere_create(center, 0.2,
+	//							  sphere_material));
+	//			}
+	//		}
+	//	}
+	//}
 	
-			if (ll_vec3_length3fv(SUB(center, POINT(4, 0.2, 0))) > 0.9) {
-				material_t sphere_material;
-	
-				if (choose_mat < 0.0) {
-					vec3_t albedo = RANDOMVEC3();
-					sphere_material = LAMBERTIAN_MATERIAL(albedo);
-					hit_list_push_back(&world, sphere_create(center, 0.2,
-								  sphere_material));
-				} else if (choose_mat < 0.95) {
-					vec3_t albedo = RANDOMVEC32f(0.5, 1);
-					float fuzz = random_float2f(0, 0.5);
-					sphere_material = METAL_MATERIAL(albedo, fuzz);
-					hit_list_push_back(&world, sphere_create(center, 0.2,
-								  sphere_material));
-				} else {
-					sphere_material = DIELECTRIC_MATERIAL(1.5);
-					hit_list_push_back(&world, sphere_create(center, 0.2,
-								  sphere_material));
-				}
-			}
-		}
-	}
-	
-	material_t material1 = DIELECTRIC_MATERIAL(1.5);
-	material_t material2 = LAMBERTIAN_MATERIAL(COLOUR(0.4, 0.2, 0.1));
-	material_t material3 = METAL_MATERIAL(COLOUR(0.7, 0.6, 0.5), 0.0);
-	hit_list_push_back(&world, sphere_create(POINT(0, 1, 0), 1.0, material1));
-	hit_list_push_back(&world, sphere_create(POINT(-4, 1, 0), 1.0, material2));
-	hit_list_push_back(&world, sphere_create(POINT(4, 1, 0), 1.0, material3));
+	//material_t material1 = DIELECTRIC_MATERIAL(1.5);
+	//material_t material2 = LAMBERTIAN_MATERIAL(COLOUR(0.4, 0.2, 0.1));
+	//material_t material3 = METAL_MATERIAL(COLOUR(0.7, 0.6, 0.5), 0.0);
+	//hit_list_push_back(&world, sphere_create(POINT(0, 1, 0), 1.0, material1));
+	//hit_list_push_back(&world, sphere_create(POINT(-4, 1, 0), 1.0, material2));
+	//hit_list_push_back(&world, sphere_create(POINT(4, 1, 0), 1.0, material3));
 
 	hittable_t *bvh_node = bvh_node_create(&world, 0, world.size);
 	world.size = 0;
@@ -489,6 +544,44 @@ main(int argc, char **argv)
 	camera.focus_dist = 10.0;
 	
 	camera_render(&world);
+}
+
+static void
+two_spheres(void)
+{
+	texture_t *checkered = checkered_create2v(0.8, COLOUR(.2, .3, .1), COLOUR(.9, .9, .9));
+	material_t *material = lambertian_create(checkered);
+
+	hit_list_push_back(&world, sphere_create(POINT(0, -10, 0), 10.0, material));
+	hit_list_push_back(&world, sphere_create(POINT(0, 10, 0), 10.0, material));
+
+	camera.image_width = IMAGE_WIDTH;
+	camera.aspect_ratio = ASPECT_RATIO;
+	camera.samples_per_pixel = 500;
+	camera.max_depth = 50;
+	
+	camera.vfov = 20;
+	camera.lookfrom = VEC3(13, 2, 3);
+	camera.lookat = VEC3(0, 0, 0);
+	camera.vup = VEC3(0, 1, 0);
+	
+	camera.defocus_angle = 0.6;
+	camera.focus_dist = 10.0;
+	
+	camera_render(&world);
+}
+
+int
+main(int argc, char **argv)
+{
+	switch (2) {
+	case 1:
+		random_spheres();
+		break;
+	case 2:
+		two_spheres();
+		break;
+	}
 	return 0;
 }
 
@@ -725,7 +818,7 @@ box_z_compare(struct hittable_t *a, struct hittable_t *b)
 }
 
 static hittable_t *
-sphere_create(point_t center1, float radius, material_t mat)
+sphere_create(point_t center1, float radius, material_t *mat)
 {
 	hittable_t *hittable;
 	hittable = malloc(sizeof(*hittable));
@@ -743,7 +836,7 @@ sphere_create(point_t center1, float radius, material_t mat)
 }
 
 static hittable_t *
-sphere_move_create(point_t center1, point_t center2, float radius, material_t mat)
+sphere_move_create(point_t center1, point_t center2, float radius, material_t *mat)
 {
 	hittable_t *hittable;
 	hittable = malloc(sizeof(*hittable));
@@ -789,6 +882,7 @@ sphere_hit(ray_t ray, hittable_t *sphere, interval_t ray_t, hit_record_t *rec)
 	vec3_t outward_normal = ll_vec3_div1f(SUB(rec->p, center),
 					      object_sphere.radius);
 	set_face_normal(ray, rec, &outward_normal);
+	get_sphere_uv(outward_normal, &rec->u, &rec->v);
 	rec->mat = object_sphere.mat;
 	return true;
 }
@@ -881,7 +975,7 @@ camera_ray_colour(hit_list_t *list, ray_t ray, int depth)
 	if (hit_list_hit(list, ray, INTERVAL2f(0.001, INFINITY))) {
 		ray_t scattered;
 		colour_t attenuation;
-		if (hit_record.mat.scatter(hit_record.mat, ray, &hit_record, &attenuation, &scattered)) {
+		if (hit_record.mat->scatter(hit_record.mat, ray, &hit_record, &attenuation, &scattered)) {
 			return MUL(attenuation, camera_ray_colour(list, scattered, depth - 1));
 		}
 		return COLOUR(0, 0, 0);
@@ -916,26 +1010,43 @@ camera_pixel_sample_square(void)
 		   ll_vec3_mul1f(camera.pixel_delta_v, py));
 }
 
+static material_t *
+lambertian_create(texture_t *texture)
+{
+	material_t *material;
+	material = malloc(sizeof(*material));
+	if (!material) {
+		fprintf(stderr, "Failed to create texture!\n");
+		exit(EXIT_FAILURE);
+	}
+
+	material->type = MATERIAL_LAMBERTIAN;
+	material->surface.lambertian = (lambertian_t) { texture };
+	material->scatter = lambertian_scatter;
+	return material;
+}
+
 static bool
-lambertian_scatter(struct material_t material, ray_t ray, struct hit_record_t *hit_record,
+lambertian_scatter(struct material_t *material, ray_t ray, struct hit_record_t *hit_record,
 		   colour_t *attenuation, ray_t *scattered)
 {
-	assert(material.type == MATERIAL_LAMBERTIAN);
-	lambertian_t lambertian = material.surface.lambertian;
+	assert(material->type == MATERIAL_LAMBERTIAN);
+	lambertian_t lambertian = material->surface.lambertian;
 	vec3_t scatter_direction = ADD(hit_record->normal, random_unit_vector());
 	if (near_zero(scatter_direction))
 		scatter_direction = hit_record->normal;
 	*scattered = RAY1f(hit_record->p, scatter_direction, ray.time);
-	*attenuation = lambertian.albedo;
+	*attenuation = lambertian.albedo->value(lambertian.albedo, hit_record->u,
+						hit_record->v, hit_record->p);
 	return true;
 }
 
 static bool
-metal_scatter(struct material_t material, ray_t ray, struct hit_record_t *hit_record,
+metal_scatter(struct material_t *material, ray_t ray, struct hit_record_t *hit_record,
 		   colour_t *attenuation, ray_t *scattered)
 {
-	assert(material.type == MATERIAL_METAL);
-	metal_t metal = material.surface.metal;
+	assert(material->type == MATERIAL_METAL);
+	metal_t metal = material->surface.metal;
 	vec3_t reflected = reflect(ll_vec3_normalise3fv(ray.direction), hit_record->normal);
 	*scattered = RAY1f(hit_record->p, ADD(reflected, ll_vec3_mul1f(random_unit_vector(), metal.fuzz)),
 			   ray.time);
@@ -944,11 +1055,11 @@ metal_scatter(struct material_t material, ray_t ray, struct hit_record_t *hit_re
 }
 
 static bool
-dielectric_scatter(struct material_t material, ray_t ray, struct hit_record_t *hit_record,
+dielectric_scatter(struct material_t *material, ray_t ray, struct hit_record_t *hit_record,
 		   colour_t *attenuation, ray_t *scattered)
 {
-	assert(material.type == MATERIAL_DIELECTRIC);
-	dielectric_t dielectric = material.surface.dielectric;
+	assert(material->type == MATERIAL_DIELECTRIC);
+	dielectric_t dielectric = material->surface.dielectric;
 	*attenuation = COLOUR(1, 1, 1);
 	float refraction_ratio = hit_record->front_face ? (1.0/dielectric.ir) : dielectric.ir;
 
@@ -1049,9 +1160,67 @@ aabb_hit(aabb_t aabb, ray_t ray, interval_t ray_t)
 	return true;
 }
 
+static texture_t *
+solid_colour_create3f(float r, float g, float b)
+{
+	texture_t *texture;
+	texture = malloc(sizeof(*texture));
+	if (!texture) {
+		fprintf(stderr, "Failed to allocate texture!\n");
+		exit(EXIT_FAILURE);
+	}
 
+	texture->type = TEXTURE_SOLID_COLOUR;
+	texture->surface.solid_colour = (solid_colour_t) { COLOUR(r, g, b) };
+	texture->value = solid_colour_value;
+	return texture;
+}
 
+static colour_t
+solid_colour_value(texture_t *texture, float u, float v, point_t p)
+{
+	assert(texture->type == TEXTURE_SOLID_COLOUR);
+	return texture->surface.solid_colour.colour;
+}
 
+static texture_t *
+checkered_create(float scale, texture_t *even, texture_t *odd)
+{
+	texture_t *texture;
+	texture = malloc(sizeof(*texture));
+	if (!texture) {
+		fprintf(stderr, "Failed to allocate texture!\n");
+		exit(EXIT_FAILURE);
+	}
+
+	texture->type = TEXTURE_CHECKERED;
+	texture->surface.checkered = (checkered_t) { scale, even, odd };
+	texture->value = checkered_value;
+	return texture;
+}
+
+static texture_t *
+checkered_create2v(float scale, colour_t c1, colour_t c2)
+{
+	return checkered_create(scale, solid_colour_create3f(c1.r, c1.g, c1.b),
+				solid_colour_create3f(c2.r, c2.g, c2.b));
+}
+
+static colour_t
+checkered_value(texture_t *texture, float u, float v, point_t p)
+{
+	assert(texture->type == TEXTURE_CHECKERED);
+	int xInteger = (int) (floor(texture->surface.checkered.inv_scale * p.x));
+	int yInteger = (int) (floor(texture->surface.checkered.inv_scale * p.y));
+	int zInteger = (int) (floor(texture->surface.checkered.inv_scale * p.z));
+
+	bool isEven = (xInteger + yInteger + zInteger) % 2 == 0;
+	if (isEven) {
+		return texture->surface.checkered.even->value(texture->surface.checkered.even, u, v, p);
+	}
+	
+	return texture->surface.checkered.odd->value(texture->surface.checkered.odd, u, v, p);
+}
 
 
 
