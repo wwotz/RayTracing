@@ -1,4 +1,4 @@
-# Ray Tracing: Following `Ray Tracing in One Weekend`
+# Ray Tracing: Following `Ray Tracing the Next Week`
 
 ![Image 1](./images/image1.png)
 ![Image 2](./images/image2.png)
@@ -13,6 +13,8 @@
 ![Image 11](./images/image11.png)
 ![Image 12](./images/image12.png)
 ![Image 13](./images/image13.png)
+![Image 14](./images/image14.png)
+![Image 15](./images/image15.png)
 
 
 

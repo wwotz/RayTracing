@@ -262,6 +262,7 @@ typedef enum mat_t {
 	MATERIAL_LAMBERTIAN,
 	MATERIAL_METAL,
 	MATERIAL_DIELECTRIC,
+	MATERIAL_DIFFUSE_LIGHT,
 	MATERIAL_COUNT,
 } mat_t;
 
@@ -278,16 +279,29 @@ typedef struct dielectric_t {
 	float ir;
 } dielectric_t;
 
+typedef struct diffuse_light_t {
+	struct texture_t *emit;
+} diffuse_light_t;
+
 typedef struct material_t {
 	mat_t type;
 	union {
 		lambertian_t lambertian;
 		metal_t metal;
 		dielectric_t dielectric;
+		diffuse_light_t diffuse_light;
 	} surface;
 	bool (*scatter)(struct material_t *material, ray_t ray, struct hit_record_t *hit_record,
 			colour_t *attenuation, ray_t *scattered);
+	colour_t (*emitted)(struct material_t *material, float u, float v, point_t p);
 } material_t;
+
+static colour_t
+default_emitted(struct material_t *material, float u,
+		float v, point_t p)
+{
+	return COLOUR(0, 0, 0);
+}
 
 static material_t *
 lambertian_create(texture_t *texture);
@@ -306,6 +320,16 @@ dielectric_scatter(struct material_t *material, ray_t ray, struct hit_record_t *
 
 static float
 reflectance(float cosine, float ref_idx);
+
+static material_t *
+diffuse_light_create(texture_t *texture);
+
+static bool
+diffuse_light_scatter(struct material_t *material, ray_t ray, struct hit_record_t *hit_record,
+		      colour_t *attenuation, ray_t *scattered);
+
+static colour_t
+diffuse_light_emitted(struct material_t *material, float u, float v, point_t p);
 
 #define LAMBERTIAN_MATERIAL(colour) (material_t) { .type = MATERIAL_LAMBERTIAN,	\
 			.surface.lambertian = (lambertian_t) { colour }, .scatter = lambertian_scatter}
@@ -488,6 +512,7 @@ struct {
 	vec3_t pixel_delta_v;
 	int samples_per_pixel;
 	int max_depth;
+	colour_t background;
 	
 	float vfov;
 	point_t lookfrom;
@@ -590,6 +615,7 @@ random_spheres(void)
 	camera.aspect_ratio = ASPECT_RATIO;
 	camera.samples_per_pixel = 500;
 	camera.max_depth = 50;
+	camera.background = COLOUR(0.7, 0.8, 1.0);
 	
 	camera.vfov = 20;
 	camera.lookfrom = VEC3(13, 2, 3);
@@ -615,6 +641,7 @@ two_spheres(void)
 	camera.aspect_ratio = ASPECT_RATIO;
 	camera.samples_per_pixel = 500;
 	camera.max_depth = 50;
+	camera.background = COLOUR(0.7, 0.8, 1.0);
 	
 	camera.vfov = 20;
 	camera.lookfrom = VEC3(13, 2, 3);
@@ -639,6 +666,7 @@ earth(void)
 	camera.aspect_ratio = ASPECT_RATIO;
 	camera.samples_per_pixel = 500;
 	camera.max_depth = 50;
+	camera.background = COLOUR(0.7, 0.8, 1.0);
 	
 	camera.vfov = 20;
 	camera.lookfrom = VEC3(0, 0, 12);
@@ -664,6 +692,7 @@ two_perlin_spheres(void)
 	camera.aspect_ratio = ASPECT_RATIO;
 	camera.samples_per_pixel = 50;
 	camera.max_depth = 50;
+	camera.background = COLOUR(0.7, 0.8, 1.0);
 	
 	camera.vfov = 20;
 	camera.lookfrom = VEC3(13, 2, 3);
@@ -701,10 +730,41 @@ quads(void)
 	camera.aspect_ratio = 1.0;
 	camera.samples_per_pixel = 50;
 	camera.max_depth = 50;
+	camera.background = COLOUR(0.7, 0.8, 1.0);
 	
 	camera.vfov = 80;
 	camera.lookfrom = VEC3(0, 0, 9);
 	camera.lookat = VEC3(0, 0, 0);
+	camera.vup = VEC3(0, 1, 0);
+	
+	camera.defocus_angle = 0.0;
+	camera.focus_dist = 10.0;
+	
+	camera_render(&world);
+}
+
+static void
+simple_light(void)
+{
+	texture_t *perlin = noise_create(4.0);
+	material_t *material = lambertian_create(perlin);
+
+	hit_list_push_back(&world, sphere_create(POINT(0, -1000, 0), 1000.0, material));
+	hit_list_push_back(&world, sphere_create(POINT(0, 2, 0), 2.0, material));
+
+	material_t *light = diffuse_light_create(solid_colour_create3f(4.0, 4.0, 4.0));
+	hit_list_push_back(&world, quad_create(POINT(3, 1, -2), VEC3(2, 0, 0), VEC3(0, 2, 0), light));
+	hit_list_push_back(&world, sphere_create(POINT(0, 7, 0), 2.0, light));
+	
+	camera.image_width = IMAGE_WIDTH;
+	camera.aspect_ratio = ASPECT_RATIO;
+	camera.samples_per_pixel = 100;
+	camera.max_depth = 50;
+	camera.background = COLOUR(0.0, 0.0, 0.0);
+	
+	camera.vfov = 20;
+	camera.lookfrom = VEC3(26, 3, 6);
+	camera.lookat = VEC3(0, 2, 0);
 	camera.vup = VEC3(0, 1, 0);
 	
 	camera.defocus_angle = 0.0;
@@ -719,7 +779,7 @@ main(int argc, char **argv)
 	srand(5);
 	SDL_Init(SDL_INIT_VIDEO);
 	IMG_Init(IMG_INIT_PNG | IMG_INIT_JPG);
-	switch (5) {
+	switch (6) {
 	case 1:
 		random_spheres();
 		break;
@@ -734,6 +794,9 @@ main(int argc, char **argv)
 		break;
 	case 5:
 		quads();
+		break;
+	case 6:
+		simple_light();
 		break;
 	}
 	SDL_Quit();
@@ -1200,18 +1263,21 @@ camera_ray_colour(hit_list_t *list, ray_t ray, int depth)
 	if (depth <= 0)
 		return COLOUR(0, 0, 0);
 	
-	if (hit_list_hit(list, ray, INTERVAL2f(0.001, INFINITY))) {
-		ray_t scattered;
-		colour_t attenuation;
-		if (hit_record.mat->scatter(hit_record.mat, ray, &hit_record, &attenuation, &scattered)) {
-			return MUL(attenuation, camera_ray_colour(list, scattered, depth - 1));
-		}
-		return COLOUR(0, 0, 0);
+	if (!hit_list_hit(list, ray, INTERVAL2f(0.001, INFINITY))) {
+		return camera.background;
 	}
-	vec3_t unit_direction = ll_vec3_normalise3fv(ray.direction);
-	float a = 0.5 * (unit_direction.y + 1.0);
-	return ADD(ll_vec3_mul1f(COLOUR(1.0, 1.0, 1.0), (1.0-a)),
-		   ll_vec3_mul1f(COLOUR(0.5, 0.7, 1.0), a));
+
+	ray_t scattered;
+	colour_t attenuation;
+	colour_t colour_from_emission = hit_record.mat->emitted(hit_record.mat, hit_record.u,
+								hit_record.v, hit_record.p);
+	
+	if (!hit_record.mat->scatter(hit_record.mat, ray, &hit_record, &attenuation, &scattered)) {
+		return colour_from_emission;
+	}
+
+	colour_t colour_from_scatter = MUL(attenuation, camera_ray_colour(list, scattered, depth - 1));
+	return ADD(colour_from_emission, colour_from_scatter);
 }
 
 static ray_t
@@ -1251,6 +1317,7 @@ lambertian_create(texture_t *texture)
 	material->type = MATERIAL_LAMBERTIAN;
 	material->surface.lambertian = (lambertian_t) { texture };
 	material->scatter = lambertian_scatter;
+	material->emitted = default_emitted;
 	return material;
 }
 
@@ -1306,6 +1373,37 @@ dielectric_scatter(struct material_t *material, ray_t ray, struct hit_record_t *
 
 	*scattered = RAY1f(hit_record->p, direction, ray.time);
 	return true;
+}
+
+static material_t *
+diffuse_light_create(texture_t *texture)
+{
+	material_t *material;
+	material = malloc(sizeof(*material));
+	if (!material) {
+		fprintf(stderr, "Failed to create texture!\n");
+		exit(EXIT_FAILURE);
+	}
+
+	material->type = MATERIAL_DIFFUSE_LIGHT;
+	material->surface.diffuse_light = (diffuse_light_t) { texture };
+	material->scatter = diffuse_light_scatter;
+	material->emitted = diffuse_light_emitted;
+	return material;
+}
+
+static bool
+diffuse_light_scatter(struct material_t *material, ray_t ray, struct hit_record_t *hit_record,
+		      colour_t *attenuation, ray_t *scattered)
+{
+	return false;
+}
+
+static colour_t
+diffuse_light_emitted(struct material_t *material, float u, float v, point_t p)
+{
+	return material->surface.diffuse_light.emit->value(material->surface.diffuse_light.emit,
+							   u, v, p);
 }
 
 static float
