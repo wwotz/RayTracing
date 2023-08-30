@@ -8,6 +8,9 @@
 #include <stdbool.h>
 #include <assert.h>
 
+#include <SDL2/SDL.h>
+#include <SDL2/SDL_image.h>
+
 typedef vec3_t colour_t;
 typedef vec3_t point_t;
 
@@ -191,16 +194,22 @@ typedef struct checkered_t {
 	struct texture_t *odd;
 } checkered_t;
 
+typedef struct image_t {
+	SDL_Surface *surface;
+} image_t;
+
 typedef struct texture_t {
 	enum {
 		TEXTURE_SOLID_COLOUR,
 		TEXTURE_CHECKERED,
+		TEXTURE_IMAGE,
 		TEXTURE_COUNT,
 	} type;
 
 	union {
 		struct solid_colour_t solid_colour;
 		struct checkered_t checkered;
+		struct image_t image;
 	} surface;
 
 	colour_t (*value)(struct texture_t *texture, float u, float v, point_t p);
@@ -220,6 +229,12 @@ checkered_create2v(float scale, colour_t c1, colour_t c2);
 
 static colour_t
 checkered_value(texture_t *texture, float u, float v, point_t p);
+
+static texture_t *
+image_create(const char *pathname);
+
+static colour_t
+image_value(texture_t *texture, float u, float v, point_t p);
 
 typedef struct hit_record_t hit_record_t;
 
@@ -550,7 +565,11 @@ static void
 two_spheres(void)
 {
 	texture_t *checkered = checkered_create2v(0.8, COLOUR(.2, .3, .1), COLOUR(.9, .9, .9));
-	material_t *material = lambertian_create(checkered);
+	texture_t *earth = image_create("earthmap.jpg");
+	printf("%dx%d\n", earth->surface.image.surface->w, earth->surface.image.surface->h);
+	printf("format: %d\n", earth->surface.image.surface->format->BytesPerPixel);
+	printf("pitch: %d\n", earth->surface.image.surface->pitch);
+	material_t *material = lambertian_create(earth);
 
 	hit_list_push_back(&world, sphere_create(POINT(0, -10, 0), 10.0, material));
 	hit_list_push_back(&world, sphere_create(POINT(0, 10, 0), 10.0, material));
@@ -574,6 +593,8 @@ two_spheres(void)
 int
 main(int argc, char **argv)
 {
+	SDL_Init(SDL_INIT_VIDEO);
+	IMG_Init(IMG_INIT_PNG | IMG_INIT_JPG);
 	switch (2) {
 	case 1:
 		random_spheres();
@@ -582,6 +603,8 @@ main(int argc, char **argv)
 		two_spheres();
 		break;
 	}
+	SDL_Quit();
+	IMG_Quit();
 	return 0;
 }
 
@@ -1220,6 +1243,62 @@ checkered_value(texture_t *texture, float u, float v, point_t p)
 	}
 	
 	return texture->surface.checkered.odd->value(texture->surface.checkered.odd, u, v, p);
+}
+
+static texture_t *
+image_create(const char *pathname)
+{
+	texture_t *texture;
+	SDL_Surface *img_surface;
+	texture = malloc(sizeof(*texture));
+	if (!texture) {
+		fprintf(stderr, "Failed to create image texture!\n");
+		exit(EXIT_FAILURE);
+	}
+	
+	img_surface = IMG_Load(pathname);
+	if (!img_surface) {
+		fprintf(stderr, "Failed to load '%s'\n", pathname);
+		exit(EXIT_FAILURE);
+	}
+
+	texture->type = TEXTURE_IMAGE;
+	texture->surface.image = (image_t) { img_surface };
+	texture->value = image_value;
+	return texture;
+}
+
+static colour_t
+image_value(texture_t *texture, float u, float v, point_t p)
+{
+	assert(texture->type == TEXTURE_IMAGE);
+	if (texture->surface.image.surface->h == 0) {
+		return COLOUR(0, 1, 1);
+	}
+
+	u = interval_clamp(INTERVAL2f(0, 1), u);
+	v = 1.0 - interval_clamp(INTERVAL2f(0, 1), v);
+
+	int i = (int) (u * texture->surface.image.surface->w);
+	int j = (int) (v * texture->surface.image.surface->h);
+
+	SDL_PixelFormat *format = texture->surface.image.surface->format;
+	void *pixels = texture->surface.image.surface->pixels;
+	int BytesPerPixel = format->BytesPerPixel;
+	int pitch = texture->surface.image.surface->pitch;
+
+	Uint8 *pixel = (Uint8 *) pixels + j * pitch + i * BytesPerPixel;
+	Uint32 PixelData = *(Uint32 *) pixel;
+
+	float colour_scale = 1.0 / 255.0;
+	colour_t colour;
+
+	Uint8 r, g, b;
+
+	SDL_GetRGB(PixelData, format, &r, &g, &b);
+	
+	colour = COLOUR(r * colour_scale, g * colour_scale, b * colour_scale);
+	return colour;
 }
 
 
