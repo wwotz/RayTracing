@@ -773,13 +773,59 @@ simple_light(void)
 	camera_render(&world);
 }
 
+static void
+cornell_box(void)
+{
+	texture_t *red = solid_colour_create3f(0.65, 0.05, 0.05);
+	texture_t *white = solid_colour_create3f(0.73, 0.73, 0.73);
+	texture_t *green = solid_colour_create3f(0.12, 0.45, 0.15);
+
+	material_t *red_material = lambertian_create(red);
+	material_t *white_material = lambertian_create(white);
+	material_t *green_material = lambertian_create(green);
+	material_t *light = diffuse_light_create(solid_colour_create3f(15, 15, 15));
+
+	hit_list_push_back(&world, quad_create(POINT(555, 0, 0), VEC3(0, 555, 0), VEC3(0, 0, 555),
+					       green_material));
+	hit_list_push_back(&world, quad_create(POINT(0, 0, 0), VEC3(0, 555, 0), VEC3(0, 0, 555),
+					       red_material));
+	hit_list_push_back(&world, quad_create(POINT(343, 554, 332), VEC3(-130, 0, 0), VEC3(0, 0, -105),
+					       light));
+	hit_list_push_back(&world, quad_create(POINT(0, 0, 0), VEC3(555, 0, 0), VEC3(0, 0, 555),
+					       white_material));
+	hit_list_push_back(&world, quad_create(POINT(555, 555, 555), VEC3(-555, 0, 0), VEC3(0, 0, -555),
+					       white_material));
+	hit_list_push_back(&world, quad_create(POINT(0, 0, 555), VEC3(555, 0, 0), VEC3(0, 555, 0),
+					       white_material));
+
+	hittable_t *bvh_node = bvh_node_create(&world, 0, world.size);
+	world.size = 0;
+	hit_list_push_back(&world, bvh_node);
+	
+	camera.image_width = IMAGE_WIDTH;
+	camera.aspect_ratio = 1.0;
+	camera.samples_per_pixel = 200;
+	camera.max_depth = 50;
+	camera.background = COLOUR(0.0, 0.0, 0.0);
+	
+	camera.vfov = 40;
+	camera.lookfrom = VEC3(278, 278, -800);
+	camera.lookat = VEC3(278, 278, 0);
+	camera.vup = VEC3(0, 1, 0);
+	
+	camera.defocus_angle = 0.0;
+	camera.focus_dist = 10.0;
+	
+	camera_render(&world);
+}
+
 int
 main(int argc, char **argv)
 {
 	srand(5);
 	SDL_Init(SDL_INIT_VIDEO);
 	IMG_Init(IMG_INIT_PNG | IMG_INIT_JPG);
-	switch (6) {
+	switch (7) {
 	case 1:
 		random_spheres();
 		break;
@@ -797,6 +843,9 @@ main(int argc, char **argv)
 		break;
 	case 6:
 		simple_light();
+		break;
+	case 7:
+		cornell_box();
 		break;
 	}
 	SDL_Quit();
