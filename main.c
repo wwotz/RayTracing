@@ -200,7 +200,7 @@ typedef struct image_t {
 
 typedef struct noise_t {
 	int point_count;
-	float *ranfloat;
+	vec3_t *ran_vec;
 	int *perm_x;
 	int *perm_y;
 	int *perm_z;
@@ -1387,6 +1387,27 @@ trilinear_interp(float c[2][2][2], float u, float v, float w)
 }
 
 static float
+perlin_interp(vec3_t c[2][2][2], float u, float v, float w)
+{
+	float uu = u*u*(3-2*u);
+	float vv = v*v*(3-2*v);
+	float ww = w*w*(3-2*w);
+	float accum = 0.0;
+	for (int i = 0; i < 2; i++) {
+		for (int j = 0; j < 2; j++) {
+			for (int k = 0; k < 2; k++) {
+				vec3_t weight_v = VEC3(u-i, v-j, w-k);
+				accum += (i*uu + (1-i)*(1-u))*
+					(j*vv + (1-j)*(1-v))*
+					(k*ww + (1-k)*(1-w))*
+					DOT(c[i][j][k], weight_v);
+			}
+		}
+	}
+	return accum;
+}
+
+static float
 noise(texture_t *texture, point_t p)
 {
 	assert(texture->type == TEXTURE_NOISE);
@@ -1394,28 +1415,46 @@ noise(texture_t *texture, point_t p)
 	float u = p.x - floor(p.x);
 	float v = p.y - floor(p.y);
 	float w = p.z - floor(p.z);
-	u = u*u*(3-2*u);
-	v = v*v*(3-2*v);
-	w = w*w*(3-2*w);
+	
 
 	int i = (int) (floor(p.x));
 	int j = (int) (floor(p.y));
 	int k = (int) (floor(p.z));
 
-	float c[2][2][2];
+	vec3_t c[2][2][2];
 	noise_t noise = texture->surface.noise;
 
 	for (int di = 0; di < 2; di++) {
 		for (int dj = 0; dj < 2; dj++) {
 			for (int dk = 0; dk < 2; dk++) {
-				c[di][dj][dk] = noise.ranfloat[noise.perm_x[(i+di) & 255]
+				c[di][dj][dk] = noise.ran_vec[noise.perm_x[(i+di) & 255]
 							       ^ noise.perm_y[(j+dj) & 255]
 							       ^ noise.perm_z[(k+dk) & 255]];
 			}
 		}
 	}
 
-	return trilinear_interp(c, u, v, w);
+	return perlin_interp(c, u, v, w);
+}
+
+static float
+turb(texture_t *texture, point_t p, int depth)
+{
+	if (depth <= 0) {
+		depth = 7;
+	}
+	
+	float accum = 0.0;
+	point_t temp_p = p;
+	float weight = 1.0;
+
+	for (int i = 0; i < depth; i++) {
+		accum += weight*noise(texture, p);
+		weight *= 0.5;
+		temp_p = ll_vec3_mul1f(temp_p, 2);
+	}
+
+	return fabs(accum);
 }
 
 static void
@@ -1459,13 +1498,14 @@ noise_create(float sc)
 	}
 
 	int point_count = 256;
-	float *ranfloat = malloc(sizeof(*ranfloat) * point_count);
-	if (!ranfloat) {
+	vec3_t *ran_vec = malloc(sizeof(*ran_vec) * point_count);
+	if (!ran_vec) {
 		fprintf(stderr, "Failed to allocate points!\n");
 		exit(EXIT_FAILURE);
 	}
 	for (i = 0; i < point_count; i++) {
-		ranfloat[i] = random_float();
+		ran_vec[i] = ll_vec3_normalise3f(random_float(), random_float(),
+						  random_float());
 	}
 	
 	int *perm_x = perlin_generate_perm(point_count);
@@ -1473,7 +1513,7 @@ noise_create(float sc)
 	int *perm_z = perlin_generate_perm(point_count);
 
 	texture->type = TEXTURE_NOISE;
-	texture->surface.noise = (noise_t) { point_count, ranfloat, perm_x, perm_y, perm_z, sc };
+	texture->surface.noise = (noise_t) { point_count, ran_vec, perm_x, perm_y, perm_z, sc };
 	texture->value = noise_value;
 	return texture;
 }
@@ -1482,7 +1522,10 @@ static colour_t
 noise_value(texture_t *texture, float u, float v, point_t p)
 {
 	assert(texture->type == TEXTURE_NOISE);
-	return ll_vec3_mul1f(COLOUR(1, 1, 1), noise(texture, ll_vec3_mul1f(p, texture->surface.noise.scale)));
+
+	p = ll_vec3_mul1f(p, texture->surface.noise.scale);
+	
+	return ll_vec3_mul1f(COLOUR(0.5, 0.5, 0.5), (1.0 + sin(p.z + 10.0*turb(texture, p, 7))));
 }
 
 
