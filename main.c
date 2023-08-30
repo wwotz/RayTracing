@@ -178,6 +178,9 @@ aabb3i(interval_t x, interval_t y, interval_t z);
 static aabb_t
 aabb2bbox(aabb_t a, aabb_t b);
 
+static aabb_t
+aabb_pad(aabb_t aabb);
+
 static interval_t
 aabb_axis(aabb_t aabb, int n);
 
@@ -329,6 +332,7 @@ hit_record_t hit_record;
 typedef enum obj_t {
 	OBJECT_SPHERE,
 	OBJECT_BVH,
+	OBJECT_QUAD,
 	OBJECT_COUNT,
 } obj_t;
 
@@ -341,6 +345,16 @@ typedef struct sphere_t {
 	aabb_t bbox;
 } sphere_t;
 
+typedef struct rect_t {
+	point_t Q;
+	vec3_t u, v;
+	material_t *mat;
+	aabb_t bbox;
+	vec3_t normal;
+	float D;
+	vec3_t w;
+} rect_t;
+
 typedef struct bvh_node_t {
 	struct hittable_t *left;
 	struct hittable_t *right;
@@ -352,6 +366,7 @@ typedef struct hittable_t {
 	union {
 		struct sphere_t sphere;
 		struct bvh_node_t bvh_node;
+		struct rect_t quad;
 	} object;
 	bool (*hit)(ray_t ray, struct hittable_t *hittable, interval_t interval,
 		    hit_record_t *hit_record);
@@ -423,6 +438,15 @@ box_y_compare(struct hittable_t *a, struct hittable_t *b);
 
 static int
 box_z_compare(struct hittable_t *a, struct hittable_t *b);
+
+static hittable_t *
+quad_create(point_t Q, vec3_t u, vec3_t v, material_t *mat);
+
+static aabb_t
+quad_bounding_box(hittable_t *hittable);
+
+static bool
+quad_hit(ray_t ray, hittable_t *quad, interval_t ray_t, hit_record_t *hit_record);
 
 typedef struct hit_list_t {
 	size_t size;
@@ -652,13 +676,50 @@ two_perlin_spheres(void)
 	camera_render(&world);
 }
 
+static void
+quads(void)
+{
+	texture_t *red = solid_colour_create3f(1.0, 0.2, 0.2);
+	texture_t *green = solid_colour_create3f(0.2, 1.0, 0.2);
+	texture_t *blue = solid_colour_create3f(0.2, 0.2, 1.0);
+	texture_t *orange = solid_colour_create3f(1.0, 0.5, 0.0);
+	texture_t *teal = solid_colour_create3f(0.2, 0.0, 0.8);
+
+	material_t *red_material = lambertian_create(red);
+	material_t *green_material = lambertian_create(green);
+	material_t *blue_material = lambertian_create(blue);
+	material_t *orange_material = lambertian_create(orange);
+	material_t *teal_material = lambertian_create(teal);
+
+	hit_list_push_back(&world, quad_create(POINT(-3, -2, 5), VEC3(0, 0, -4), VEC3(0, 4, 0), red_material));
+	hit_list_push_back(&world, quad_create(POINT(-2, -2, 0), VEC3(4, 0, 0), VEC3(0, 4, 0), green_material));
+	hit_list_push_back(&world, quad_create(POINT(3, -2, 1), VEC3(0, 0, 4), VEC3(0, 4, 0), blue_material));
+	hit_list_push_back(&world, quad_create(POINT(-2, 3, 1), VEC3(4, 0, 0), VEC3(0, 0, 4), orange_material));
+	hit_list_push_back(&world, quad_create(POINT(-2, -3, 5), VEC3(4, 0, 0), VEC3(0, 0, -4), teal_material));
+	
+	camera.image_width = IMAGE_WIDTH;
+	camera.aspect_ratio = 1.0;
+	camera.samples_per_pixel = 50;
+	camera.max_depth = 50;
+	
+	camera.vfov = 80;
+	camera.lookfrom = VEC3(0, 0, 9);
+	camera.lookat = VEC3(0, 0, 0);
+	camera.vup = VEC3(0, 1, 0);
+	
+	camera.defocus_angle = 0.0;
+	camera.focus_dist = 10.0;
+	
+	camera_render(&world);
+}
+
 int
 main(int argc, char **argv)
 {
 	srand(5);
 	SDL_Init(SDL_INIT_VIDEO);
 	IMG_Init(IMG_INIT_PNG | IMG_INIT_JPG);
-	switch (4) {
+	switch (5) {
 	case 1:
 		random_spheres();
 		break;
@@ -670,6 +731,9 @@ main(int argc, char **argv)
 		break;
 	case 4:
 		two_perlin_spheres();
+		break;
+	case 5:
+		quads();
 		break;
 	}
 	SDL_Quit();
@@ -731,6 +795,7 @@ write_colour(colour_t colour, int samples_per_pixel)
 		(int) (256 * interval_clamp(intensity, r)),
 		(int) (256 * interval_clamp(intensity, g)),
 		(int) (256 * interval_clamp(intensity, b)));
+
 }
 
 static void
@@ -986,6 +1051,77 @@ sphere_bounding_box(struct hittable_t *hittable)
 	return hittable->object.sphere.bbox;
 }
 
+static hittable_t *
+quad_create(point_t Q, vec3_t u, vec3_t v, material_t *mat)
+{
+	hittable_t *hittable;
+	hittable = malloc(sizeof(*hittable));
+	if (!hittable) {
+		fprintf(stderr, "Failed to allocate hittable!\n");
+		exit(EXIT_FAILURE);
+	}
+
+	
+
+	aabb_t bbox = aabb_pad(aabb2v(Q, ADD(u, v)));
+
+	vec3_t n = CROSS(u, v);
+	vec3_t normal = ll_vec3_normalise3fv(n);
+	float D = DOT(normal, Q);
+	vec3_t w = ll_vec3_div1f(n, DOT(n,n));
+	
+	hittable->type = OBJECT_QUAD;
+	hittable->object.quad = (rect_t) { Q, u, v, mat, bbox, normal, D, w };
+	hittable->hit = quad_hit;
+	hittable->bounding_box = quad_bounding_box;
+	return hittable;
+}
+
+static aabb_t
+quad_bounding_box(hittable_t *hittable)
+{
+	assert(hittable->type == OBJECT_QUAD);
+	return hittable->object.quad.bbox;
+}
+
+static bool
+is_interior(float a, float b, hit_record_t *hit_record)
+{
+	if ((a < 0) || (1 < a) || (b < 0) || (1 < b))
+		return false;
+
+	hit_record->u = a;
+	hit_record->v = b;
+	return true;
+}
+
+static bool
+quad_hit(ray_t ray, hittable_t *quad, interval_t ray_t, hit_record_t *hit_record)
+{
+	float denom = DOT(quad->object.quad.normal, ray.direction);
+
+	if (fabs(denom) < 1e-8)
+		return false;
+
+	float t = (quad->object.quad.D - DOT(quad->object.quad.normal, ray.origin)) / denom;
+	if (!interval_contains(ray_t, t))
+		return false;
+
+	vec3_t intersection = RAY_AT(ray, t);
+	vec3_t planar_hitpt_vector = SUB(intersection, quad->object.quad.Q);
+	float alpha = DOT(quad->object.quad.w, CROSS(planar_hitpt_vector, quad->object.quad.v));
+	float beta = DOT(quad->object.quad.w, CROSS(quad->object.quad.u, planar_hitpt_vector));
+
+	if (!is_interior(alpha, beta, hit_record))
+		return false;
+
+	hit_record->t = t;
+	hit_record->p = intersection;
+	hit_record->mat = quad->object.quad.mat;
+	set_face_normal(ray, hit_record, &quad->object.quad.normal);
+	return true;
+}
+
 static void
 camera_render(struct hit_list_t *list)
 {
@@ -1217,6 +1353,16 @@ aabb2bbox(aabb_t a, aabb_t b)
 		INTERVAL2v(a.y, b.y),
 		INTERVAL2v(a.z, b.z)
 	};
+}
+
+static aabb_t
+aabb_pad(aabb_t aabb)
+{
+	float delta = 0.0001;
+	interval_t new_x = (interval_size(aabb.x) >= delta) ? aabb.x : interval_expand(aabb.x, delta);
+	interval_t new_y = (interval_size(aabb.y) >= delta) ? aabb.y : interval_expand(aabb.y, delta);
+	interval_t new_z = (interval_size(aabb.z) >= delta) ? aabb.z : interval_expand(aabb.z, delta);
+	return aabb3i(new_x, new_y, new_z);
 }
 
 static interval_t
