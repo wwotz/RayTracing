@@ -204,6 +204,7 @@ typedef struct noise_t {
 	int *perm_x;
 	int *perm_y;
 	int *perm_z;
+	float scale;
 } noise_t;
 
 typedef struct texture_t {
@@ -247,7 +248,7 @@ static colour_t
 image_value(texture_t *texture, float u, float v, point_t p);
 
 static texture_t *
-noise_create(void);
+noise_create(float sc);
 
 static colour_t
 noise_value(texture_t *texture, float u, float v, point_t p);
@@ -629,7 +630,7 @@ earth(void)
 static void
 two_perlin_spheres(void)
 {
-	texture_t *perlin = noise_create();
+	texture_t *perlin = noise_create(4.0);
 	material_t *material = lambertian_create(perlin);
 
 	hit_list_push_back(&world, sphere_create(POINT(0, -1000, 0), 1000.0, material));
@@ -1370,19 +1371,51 @@ image_value(texture_t *texture, float u, float v, point_t p)
 }
 
 static float
+trilinear_interp(float c[2][2][2], float u, float v, float w)
+{
+	float accum = 0.0;
+	for (int i = 0; i < 2; i++) {
+		for (int j = 0; j < 2; j++) {
+			for (int k = 0; k < 2; k++) {
+				accum += (i*u + (1-i)*(1-u))*
+					(j*v + (1-j)*(1-v))*
+					(k*w + (1-k)*(1-w))*c[i][j][k];
+			}
+		}
+	}
+	return accum;
+}
+
+static float
 noise(texture_t *texture, point_t p)
 {
 	assert(texture->type == TEXTURE_NOISE);
-	int i = (int) (4 * p.x);
-	int j = (int) (4 * p.y);
-	int k = (int) (4 * p.z);
+	
+	float u = p.x - floor(p.x);
+	float v = p.y - floor(p.y);
+	float w = p.z - floor(p.z);
+	u = u*u*(3-2*u);
+	v = v*v*(3-2*v);
+	w = w*w*(3-2*w);
 
-	i &= 0x000000ff;
-	j &= 0x000000ff;
-	k &= 0x000000ff;
+	int i = (int) (floor(p.x));
+	int j = (int) (floor(p.y));
+	int k = (int) (floor(p.z));
 
+	float c[2][2][2];
 	noise_t noise = texture->surface.noise;
-	return noise.ranfloat[noise.perm_x[i] ^ noise.perm_y[j] ^ noise.perm_z[k]];
+
+	for (int di = 0; di < 2; di++) {
+		for (int dj = 0; dj < 2; dj++) {
+			for (int dk = 0; dk < 2; dk++) {
+				c[di][dj][dk] = noise.ranfloat[noise.perm_x[(i+di) & 255]
+							       ^ noise.perm_y[(j+dj) & 255]
+							       ^ noise.perm_z[(k+dk) & 255]];
+			}
+		}
+	}
+
+	return trilinear_interp(c, u, v, w);
 }
 
 static void
@@ -1415,7 +1448,7 @@ perlin_generate_perm(int point_count)
 }
 
 static texture_t *
-noise_create(void)
+noise_create(float sc)
 {
 	int i;
 	texture_t *texture;
@@ -1440,7 +1473,7 @@ noise_create(void)
 	int *perm_z = perlin_generate_perm(point_count);
 
 	texture->type = TEXTURE_NOISE;
-	texture->surface.noise = (noise_t) { point_count, ranfloat, perm_x, perm_y, perm_z };
+	texture->surface.noise = (noise_t) { point_count, ranfloat, perm_x, perm_y, perm_z, sc };
 	texture->value = noise_value;
 	return texture;
 }
@@ -1449,7 +1482,7 @@ static colour_t
 noise_value(texture_t *texture, float u, float v, point_t p)
 {
 	assert(texture->type == TEXTURE_NOISE);
-	return ll_vec3_mul1f(COLOUR(1, 1, 1), noise(texture, p));
+	return ll_vec3_mul1f(COLOUR(1, 1, 1), noise(texture, ll_vec3_mul1f(p, texture->surface.noise.scale)));
 }
 
 
