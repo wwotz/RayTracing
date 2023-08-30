@@ -46,6 +46,12 @@ random_float2f(float min, float max)
 	return min + (max-min) * random_float();
 }
 
+static inline int
+random_int2i(int min, int max)
+{
+	return (int) (random_float2f(min, max + 1));
+}
+
 #define RANDOMVEC3() VEC3(random_float(), random_float(), random_float())
 #define RANDOMVEC32f(min, max) VEC3(random_float2f(min, max), random_float2f(min, max), \
 				    random_float2f(min, max))
@@ -136,7 +142,7 @@ static interval_t
 interval_expand(interval_t interval, float delta);
 
 #define INTERVAL2f(a, b) (interval_t) { a, b }
-#define INTERVAL2v(a, b) (interval_t) { fmin(a.min, a.max), fmax(b.min, b.max) }
+
 
 const static interval_t empty    = INTERVAL2f(+INFINITY, -INFINITY);
 const static interval_t universe = INTERVAL2f(-INFINITY, +INFINITY);
@@ -155,11 +161,19 @@ typedef struct aabb_t {
 	interval_t x, y, z;
 } aabb_t;
 
-#define AABB() (aabb_t) { empty, empty, empty }
-#define AABB2v(a, b) (aabb_t) { INTERVAL2f(fmin(a.x, b.x), fmax(a.x, b.x)), INTERVAL2f(fmin(a.y, b.y), fmax(a.y, b.y)), \
-			INTERVAL2f(fmin(a.z, b.z), fmax(a.z, b.z)) }
-#define AABB3v(x, y, z) (aab_t) { x, y, z }
-#define AABB2bbox(a, b) (aabb_t) { INTERVAL2v(a.x, b.x), INTERVAL2v(a.y, b.y), INTERVAL2v(a.z, b.z) }
+#define INTERVAL2v(a, b) INTERVAL2f(fmin(a.min, b.min), fmax(a.max, b.max))
+
+static aabb_t
+aabb_empty(void);
+
+static aabb_t
+aabb2v(point_t a, point_t b);
+
+static aabb_t
+aabb3i(interval_t x, interval_t y, interval_t z);
+
+static aabb_t
+aabb2bbox(aabb_t a, aabb_t b);
 
 static interval_t
 aabb_axis(aabb_t aabb, int n);
@@ -167,43 +181,6 @@ aabb_axis(aabb_t aabb, int n);
 static bool
 aabb_hit(aabb_t aabb, ray_t ray, interval_t ray_t);
 
-struct {
-	double aspect_ratio;
-	int image_width;
-	int image_height;
-	point_t center;
-	point_t pixel00_loc;
-	vec3_t pixel_delta_u;
-	vec3_t pixel_delta_v;
-	int samples_per_pixel;
-	int max_depth;
-	
-	float vfov;
-	point_t lookfrom;
-	point_t lookat;
-	vec3_t vup;
-	vec3_t u, v, w;
-	vec3_t defocus_disk_u;
-	vec3_t defocus_disk_v;
-
-	float defocus_angle;
-	float focus_dist;
-} camera;
-
-static void
-camera_render(void);
-
-static void
-camera_initialize(void);
-
-static colour_t
-camera_ray_colour(ray_t ray, int depth);
-
-static ray_t
-camera_get_ray(int i, int j);
-
-static vec3_t
-camera_pixel_sample_square(void);
 
 typedef struct hit_record_t hit_record_t;
 
@@ -271,8 +248,11 @@ typedef struct hit_record_t {
 	bool front_face;
 } hit_record_t;
 
+hit_record_t hit_record;
+
 typedef enum obj_t {
 	OBJECT_SPHERE,
+	OBJECT_BVH,
 	OBJECT_COUNT,
 } obj_t;
 
@@ -285,20 +265,31 @@ typedef struct sphere_t {
 	aabb_t bbox;
 } sphere_t;
 
+typedef struct bvh_node_t {
+	struct hittable_t *left;
+	struct hittable_t *right;
+	aabb_t bbox;
+} bvh_node_t;
+
 typedef struct hittable_t {
 	obj_t type;
 	union {
 		struct sphere_t sphere;
+		struct bvh_node_t bvh_node;
 	} object;
-	bool (*hit)(ray_t ray, struct hittable_t hittable, interval_t interval,
+	bool (*hit)(ray_t ray, struct hittable_t *hittable, interval_t interval,
 		    hit_record_t *hit_record);
-	aabb_t (*bounding_box)(struct hittable_t hittable);
+	aabb_t (*bounding_box)(struct hittable_t *hittable);
 } hittable_t;
 
-static hit_record_t hit_record;
+static hittable_t *
+sphere_create(point_t center1, float radius, material_t mat);
+
+static hittable_t *
+sphere_move_create(point_t center1, point_t center2, float radius, material_t mat);
 
 static bool
-sphere_hit(ray_t ray, hittable_t sphere, interval_t ray_t, hit_record_t *hit_record);
+sphere_hit(ray_t ray, hittable_t *sphere, interval_t ray_t, hit_record_t *hit_record);
 
 static point_t
 sphere_center(sphere_t sphere, float time)
@@ -307,13 +298,12 @@ sphere_center(sphere_t sphere, float time)
 }
 
 static aabb_t
-sphere_bounding_box(struct hittable_t hittable);
+sphere_bounding_box(struct hittable_t *hittable);
 
-#define SPHERE_AABB(center1, radius) AABB2v(SUB(center1, VEC3(radius, radius, radius)), \
+#define SPHERE_AABB(center1, radius) aabb2v(SUB(center1, VEC3(radius, radius, radius)), \
 					   ADD(center1, VEC3(radius, radius, radius)))
 
-#define SPHERE_MOVE_AABB(center1, center2, radius) AABB2bbox(SPHERE_AABB(center1, radius), \
-							     SPHERE_AABB(center2, radius))
+#define SPHERE_MOVE_AABB(center1, center2, radius) aabb2bbox(SPHERE_AABB(center1, radius), SPHERE_AABB(center2, radius))
 
 #define SPHERE(center1, radius, mat) (hittable_t) { OBJECT_SPHERE,	\
 			.object.sphere = (sphere_t) { center1, radius, mat, false, \
@@ -322,21 +312,51 @@ sphere_bounding_box(struct hittable_t hittable);
 
 #define SPHERE_MOVE(center1, center2, radius, mat) (hittable_t) { OBJECT_SPHERE, \
 			.object.sphere = (sphere_t) { center1, radius, mat, true, \
-						      SUB(center2, center1), SPHERE_AABB(center1, radius) }, \
+						      SUB(center2, center1), SPHERE_MOVE_AABB(center1, center2, radius) }, \
 			.hit = sphere_hit, .bounding_box = sphere_bounding_box } 
-	
-struct {
+
+typedef struct hit_list_t hit_list_t;
+
+static hittable_t *
+bvh_node_create(struct hit_list_t *list, size_t start, size_t end);
+
+static bool
+bvh_node_hit(ray_t ray, hittable_t *bvh_node, interval_t ray_t, hit_record_t *hit_record);
+
+static aabb_t
+bvh_node_bounding_box(struct hittable_t *hittable);
+
+static int
+box_compare(struct hittable_t *a, struct hittable_t *b, int index);
+
+static int
+box_x_compare(struct hittable_t *a, struct hittable_t *b);
+
+static int
+box_y_compare(struct hittable_t *a, struct hittable_t *b);
+
+static int
+box_z_compare(struct hittable_t *a, struct hittable_t *b);
+
+typedef struct hit_list_t {
 	size_t size;
 	size_t capacity;
-	hittable_t *list;
-} hit_list;
+	hittable_t **list;
+	aabb_t bbox;
+} hit_list_t;
+
+hit_list_t world;
 
 #define HIT_LIST_DEFAULT_CAPACITY 8
 
 static void
-hit_list_push_back(hittable_t hittable);
+hit_list_push_back(hit_list_t *list, hittable_t *hittable);
 static bool
-hit_list_hit(ray_t ray, interval_t ray_t);
+hit_list_hit(hit_list_t *list, ray_t ray, interval_t ray_t);
+static hit_list_t
+hit_list_copy(hit_list_t *list);
+static aabb_t
+hit_list_bounding_box(hit_list_t *list);
 
 static void
 set_face_normal(ray_t ray, hit_record_t *rec, const vec3_t *outward_normal);
@@ -347,37 +367,97 @@ write_colour(colour_t colour, int samples_per_pixel);
 static float
 hit_sphere(point_t center, float radius);
 
+
+struct {
+	double aspect_ratio;
+	int image_width;
+	int image_height;
+	point_t center;
+	point_t pixel00_loc;
+	vec3_t pixel_delta_u;
+	vec3_t pixel_delta_v;
+	int samples_per_pixel;
+	int max_depth;
+	
+	float vfov;
+	point_t lookfrom;
+	point_t lookat;
+	vec3_t vup;
+	vec3_t u, v, w;
+	vec3_t defocus_disk_u;
+	vec3_t defocus_disk_v;
+
+	float defocus_angle;
+	float focus_dist;
+} camera;
+
+static void
+camera_render(hit_list_t *list);
+
+static void
+camera_initialize(void);
+
+static colour_t
+camera_ray_colour(hit_list_t *list, ray_t ray, int depth);
+
+static ray_t
+camera_get_ray(int i, int j);
+
+static vec3_t
+camera_pixel_sample_square(void);
+
+static int
+internal_box_x_compare(const void *a, const void *b)
+{
+	hittable_t *a_ = *(hittable_t **) a;
+	hittable_t *b_ = *(hittable_t **) b;
+	return box_x_compare(a_, b_);
+}
+
+static int
+internal_box_y_compare(const void *a, const void *b)
+{
+	hittable_t *a_ = *(hittable_t **) a;
+	hittable_t *b_ = *(hittable_t **) b;
+	return box_y_compare(a_, b_);
+}
+
+static int
+internal_box_z_compare(const void *a, const void *b)
+{
+	hittable_t *a_ = *(hittable_t **) a;
+	hittable_t *b_ = *(hittable_t **) b;
+	return box_z_compare(a_, b_);
+}
+
 int
 main(int argc, char **argv)
 {
 	material_t material_ground = LAMBERTIAN_MATERIAL(COLOUR(0.5, 0.5, 0.5));
-	hit_list_push_back(SPHERE(POINT(0, -1000, 0), 1000, material_ground));
-
+	hit_list_push_back(&world, sphere_create(POINT(0, -1000, 0), 1000, material_ground));
+	
 	for (int a = -11; a < 11; a++) {
 		for (int b = -11; b < 11; b++) {
 			float choose_mat = random_float();
 			point_t center = POINT(a + 0.9*random_float(), 0.2, b + 0.9*random_float());
-
+	
 			if (ll_vec3_length3fv(SUB(center, POINT(4, 0.2, 0))) > 0.9) {
 				material_t sphere_material;
-
+	
 				if (choose_mat < 0.0) {
 					vec3_t albedo = RANDOMVEC3();
 					sphere_material = LAMBERTIAN_MATERIAL(albedo);
-					vec3_t center2 = ADD(center, VEC3(0, random_float2f(0, .5), 0));
-					hit_list_push_back(SPHERE_MOVE(center, center2, 0.2,
+					hit_list_push_back(&world, sphere_create(center, 0.2,
 								  sphere_material));
 				} else if (choose_mat < 0.95) {
 					vec3_t albedo = RANDOMVEC32f(0.5, 1);
 					float fuzz = random_float2f(0, 0.5);
-					vec3_t center2 = ADD(center, VEC3(0, random_float2f(0, .5), 0));
 					sphere_material = METAL_MATERIAL(albedo, fuzz);
-					hit_list_push_back(SPHERE_MOVE(center, center2, 0.2,
+					hit_list_push_back(&world, sphere_create(center, 0.2,
 								  sphere_material));
 				} else {
 					sphere_material = DIELECTRIC_MATERIAL(1.5);
-					vec3_t center2 = ADD(center, VEC3(0, random_float2f(0, .5), 0));
-					hit_list_push_back(SPHERE_MOVE(center, center2, 0.2,
+					hit_list_push_back(&world, sphere_create(center, 0.2,
 								  sphere_material));
 				}
 			}
@@ -387,10 +467,14 @@ main(int argc, char **argv)
 	material_t material1 = DIELECTRIC_MATERIAL(1.5);
 	material_t material2 = LAMBERTIAN_MATERIAL(COLOUR(0.4, 0.2, 0.1));
 	material_t material3 = METAL_MATERIAL(COLOUR(0.7, 0.6, 0.5), 0.0);
-	hit_list_push_back(SPHERE(POINT(0, 1, 0), 1.0, material1));
-	hit_list_push_back(SPHERE(POINT(-4, 1, 0), 1.0, material2));
-	hit_list_push_back(SPHERE(POINT(4, 1, 0), 1.0, material3));
-	
+	hit_list_push_back(&world, sphere_create(POINT(0, 1, 0), 1.0, material1));
+	hit_list_push_back(&world, sphere_create(POINT(-4, 1, 0), 1.0, material2));
+	hit_list_push_back(&world, sphere_create(POINT(4, 1, 0), 1.0, material3));
+
+	hittable_t *bvh_node = bvh_node_create(&world, 0, world.size);
+	world.size = 0;
+	hit_list_push_back(&world, bvh_node);
+
 	camera.image_width = IMAGE_WIDTH;
 	camera.aspect_ratio = ASPECT_RATIO;
 	camera.samples_per_pixel = 500;
@@ -400,11 +484,11 @@ main(int argc, char **argv)
 	camera.lookfrom = VEC3(13, 2, 3);
 	camera.lookat = VEC3(0, 0, 0);
 	camera.vup = VEC3(0, 1, 0);
-
+	
 	camera.defocus_angle = 0.6;
 	camera.focus_dist = 10.0;
-
-	camera_render();
+	
+	camera_render(&world);
 	return 0;
 }
 
@@ -465,44 +549,47 @@ write_colour(colour_t colour, int samples_per_pixel)
 }
 
 static void
-hit_list_push_back(hittable_t hittable)
+hit_list_push_back(hit_list_t *list, hittable_t *hittable)
 {
 	void *new_list;
-	if (hit_list.list) {
-		if (hit_list.size == hit_list.capacity) {
-			new_list = realloc(hit_list.list, sizeof(*hit_list.list) * hit_list.capacity*2);
+	if (list->list) {
+		if (list->size == list->capacity) {
+			new_list = realloc(list->list, sizeof(*list->list) * list->capacity*2);
 			if (!new_list) {
 				fprintf(stderr, "Failed to resize list!\n");
 				exit(EXIT_FAILURE);
 			}
-			hit_list.list = new_list;
-			hit_list.capacity *= 2;
+			list->list = new_list;
+			list->capacity *= 2;
 		}
 	} else {
-		hit_list.size = 0;
-		hit_list.capacity = HIT_LIST_DEFAULT_CAPACITY;
-		hit_list.list = calloc(hit_list.capacity, sizeof(*hit_list.list));
-		if (!hit_list.list) {
+		list->size = 0;
+		list->capacity = HIT_LIST_DEFAULT_CAPACITY;
+		list->list = calloc(list->capacity, sizeof(*list->list));
+		if (!list->list) {
 			fprintf(stderr, "Failed to allocate list!\n");
 			exit(EXIT_FAILURE);
 		}
+		list->bbox = aabb_empty();
 	}
 
-	hit_list.list[hit_list.size++] = hittable;
+	list->list[list->size] = hittable;
+	++list->size;
+	list->bbox = aabb2bbox(list->bbox, hittable->bounding_box(hittable));
 }
 
 static bool
-hit_list_hit(ray_t ray, interval_t ray_t)
+hit_list_hit(hit_list_t *list, ray_t ray, interval_t ray_t)
 {
 	size_t i;
 	hit_record_t temp_rec;
 	bool hit_anything = false;
 	float closest_so_far = ray_t.max;
-	hittable_t hittable;
+	hittable_t *hittable;
 
-	for (i = 0; i < hit_list.size; i++) {
-		hittable = hit_list.list[i];
-		if (hittable.hit(ray, hittable, INTERVAL2f(ray_t.min, closest_so_far), &temp_rec)) {
+	for (i = 0; i < list->size; i++) {
+		hittable = list->list[i];
+		if (hittable->hit(ray, hittable, INTERVAL2f(ray_t.min, closest_so_far), &temp_rec)) {
 			hit_anything = true;
 			closest_so_far = temp_rec.t;
 			hit_record = temp_rec;
@@ -510,6 +597,28 @@ hit_list_hit(ray_t ray, interval_t ray_t)
 	}
 	
 	return hit_anything;
+}
+
+static hit_list_t
+hit_list_copy(hit_list_t *list)
+{
+	hit_list_t new_list;
+	new_list.capacity = list->size;
+	new_list.size = list->size;
+	new_list.list = calloc(new_list.capacity, sizeof(*new_list.list));
+	if (!new_list.list) {
+		fprintf(stderr, "Failed to allocate list!\n");
+		exit(EXIT_FAILURE);
+	}
+
+	memcpy(new_list.list, list->list, new_list.capacity * sizeof(*new_list.list));
+	return new_list;
+}
+
+static aabb_t
+hit_list_bounding_box(hit_list_t *list)
+{
+	return list->bbox;
 }
 
 static void
@@ -520,11 +629,143 @@ set_face_normal(ray_t ray, hit_record_t *rec, const vec3_t *outward_normal)
 		: ll_vec3_mul1f(*outward_normal, -1.0);
 }
 
-static bool
-sphere_hit(ray_t ray, hittable_t sphere, interval_t ray_t, hit_record_t *rec)
+static hittable_t *
+bvh_node_create(hit_list_t *list, size_t start, size_t end)
 {
-	assert(sphere.type == OBJECT_SPHERE);
-	sphere_t object_sphere = sphere.object.sphere;
+	hittable_t *hittable;
+	hittable = malloc(sizeof(*hittable));
+	if (!hittable) {
+		fprintf(stderr, "Failed to allocate bvh node!\n");
+		exit(EXIT_FAILURE);
+	}
+
+	int axis = random_int2i(0, 2);
+	int (*cmp)(const void *, const void *);
+	cmp = (axis == 0) ? internal_box_x_compare
+		: (axis == 1) ? internal_box_y_compare
+		: internal_box_z_compare;
+
+	hittable->type = OBJECT_BVH;
+
+	hittable->object.bvh_node = (bvh_node_t) { NULL, NULL, aabb_empty() };
+	hittable->hit = bvh_node_hit;
+	hittable->bounding_box = bvh_node_bounding_box;
+
+	hit_list_t new_list = hit_list_copy(list);
+
+	size_t object_span = end - start;
+	if (object_span == 1) {
+		hittable->object.bvh_node.left = hittable->object.bvh_node.right = new_list.list[start];
+	} else if (object_span == 2) {
+		if (cmp(new_list.list+start, new_list.list+start+1)) {
+			hittable->object.bvh_node.left = new_list.list[start];
+			hittable->object.bvh_node.right = new_list.list[start+1];
+		} else {
+			hittable->object.bvh_node.left = new_list.list[start+1];
+			hittable->object.bvh_node.right = new_list.list[start];
+		}
+	} else {
+		int mid = start + object_span / 2;
+		qsort(new_list.list + start, object_span, sizeof(*new_list.list), cmp);
+		hittable->object.bvh_node.left = bvh_node_create(&new_list, start, mid);
+		hittable->object.bvh_node.right = bvh_node_create(&new_list, mid, end);
+	}
+
+	hittable->object.bvh_node.bbox = aabb2bbox(hittable->object.bvh_node.left->bounding_box(hittable->object.bvh_node.left),
+						   hittable->object.bvh_node.right->bounding_box(hittable->object.bvh_node.right));
+	return hittable;
+}
+
+static bool
+bvh_node_hit(ray_t ray, hittable_t *bvh_node, interval_t ray_t, hit_record_t *hit_record)
+{
+	assert(bvh_node->type == OBJECT_BVH);
+	bvh_node_t bvh = bvh_node->object.bvh_node;
+	if (!aabb_hit(bvh.bbox, ray, ray_t))
+		return false;
+
+	bool hit_left = bvh.left->hit(ray, bvh.left, ray_t, hit_record);
+	bool hit_right = bvh.right->hit(ray, bvh.right, INTERVAL2f(ray_t.min, hit_left ? hit_record->t
+								    : ray_t.max), hit_record);
+	return hit_left || hit_right;
+}
+
+static aabb_t
+bvh_node_bounding_box(struct hittable_t *hittable)
+{
+	assert(hittable->type == OBJECT_BVH);
+	bvh_node_t bvh = hittable->object.bvh_node;
+	return bvh.bbox;
+}
+
+static int
+box_compare(struct hittable_t *a, struct hittable_t *b, int index)
+{
+	aabb_t bbox_a = a->bounding_box(a);
+	aabb_t bbox_b = b->bounding_box(b);
+	return aabb_axis(bbox_a, index).min < aabb_axis(bbox_b, index).min;
+}
+
+static int
+box_x_compare(struct hittable_t *a, struct hittable_t *b)
+{
+	return box_compare(a, b, 0);
+}
+
+static int
+box_y_compare(struct hittable_t *a, struct hittable_t *b)
+{
+	return box_compare(a, b, 1);
+}
+
+static int
+box_z_compare(struct hittable_t *a, struct hittable_t *b)
+{
+	return box_compare(a, b, 2);
+}
+
+static hittable_t *
+sphere_create(point_t center1, float radius, material_t mat)
+{
+	hittable_t *hittable;
+	hittable = malloc(sizeof(*hittable));
+	if (!hittable) {
+		fprintf(stderr, "failed to allocate sphere!\n");
+		exit(EXIT_FAILURE);
+	}
+
+	hittable->type = OBJECT_SPHERE;
+	hittable->object.sphere = (sphere_t) { center1, radius, mat, false,
+					       center1, SPHERE_AABB(center1, radius)};
+	hittable->hit = sphere_hit;
+	hittable->bounding_box = sphere_bounding_box;
+	return hittable;
+}
+
+static hittable_t *
+sphere_move_create(point_t center1, point_t center2, float radius, material_t mat)
+{
+	hittable_t *hittable;
+	hittable = malloc(sizeof(*hittable));
+	if (!hittable) {
+		fprintf(stderr, "failed to allocate sphere!\n");
+		exit(EXIT_FAILURE);
+	}
+
+	hittable->type = OBJECT_SPHERE;
+	hittable->object.sphere = (sphere_t) { center1, radius, mat, true,
+					       SUB(center2, center1),
+					       SPHERE_MOVE_AABB(center1, center2, radius)};
+	hittable->hit = sphere_hit;
+	hittable->bounding_box = sphere_bounding_box;
+	return hittable;
+}
+
+static bool
+sphere_hit(ray_t ray, hittable_t *sphere, interval_t ray_t, hit_record_t *rec)
+{
+	assert(sphere->type == OBJECT_SPHERE);
+	sphere_t object_sphere = sphere->object.sphere;
 	point_t center = object_sphere.is_moving ? sphere_center(object_sphere, ray.time)
 		: object_sphere.center1;
 	vec3_t oc = SUB(ray.origin, center);
@@ -553,15 +794,14 @@ sphere_hit(ray_t ray, hittable_t sphere, interval_t ray_t, hit_record_t *rec)
 }
 
 static aabb_t
-sphere_bounding_box(struct hittable_t hittable)
+sphere_bounding_box(struct hittable_t *hittable)
 {
-	assert(hittable.type == OBJECT_SPHERE);
-	sphere_t object_sphere = hittable.object.sphere;
-	return object_sphere.bbox;
+	assert(hittable->type == OBJECT_SPHERE);
+	return hittable->object.sphere.bbox;
 }
 
 static void
-camera_render(void)
+camera_render(struct hit_list_t *list)
 {
 	int i, j, sample;
 	char *progress_bar;
@@ -584,11 +824,12 @@ camera_render(void)
 		printf("\r%f: %.*s", ((j + 1) / (float) camera.image_height) * 100.0,
 		       (int) (((j + 1) / (float) camera.image_height) * 40),
 		       progress_bar);
+		fflush(stdout);
 		for (i = 0; i < camera.image_width; i++) {
 			colour_t pixel_colour = COLOUR(0, 0, 0);
 			for (sample = 0; sample < camera.samples_per_pixel; ++sample) {
 				ray_t r = camera_get_ray(i, j);
-				pixel_colour = ADD(pixel_colour, camera_ray_colour(r, camera.max_depth));
+				pixel_colour = ADD(pixel_colour, camera_ray_colour(&world, r, camera.max_depth));
 			}
 			write_colour(pixel_colour, camera.samples_per_pixel);
 		}
@@ -632,16 +873,16 @@ camera_initialize(void)
 }
 
 static colour_t
-camera_ray_colour(ray_t ray, int depth)
+camera_ray_colour(hit_list_t *list, ray_t ray, int depth)
 {
 	if (depth <= 0)
 		return COLOUR(0, 0, 0);
 	
-	if (hit_list_hit(ray, INTERVAL2f(0.001, INFINITY))) {
+	if (hit_list_hit(list, ray, INTERVAL2f(0.001, INFINITY))) {
 		ray_t scattered;
 		colour_t attenuation;
 		if (hit_record.mat.scatter(hit_record.mat, ray, &hit_record, &attenuation, &scattered)) {
-			return MUL(attenuation, camera_ray_colour(scattered, depth - 1));
+			return MUL(attenuation, camera_ray_colour(list, scattered, depth - 1));
 		}
 		return COLOUR(0, 0, 0);
 	}
@@ -696,7 +937,8 @@ metal_scatter(struct material_t material, ray_t ray, struct hit_record_t *hit_re
 	assert(material.type == MATERIAL_METAL);
 	metal_t metal = material.surface.metal;
 	vec3_t reflected = reflect(ll_vec3_normalise3fv(ray.direction), hit_record->normal);
-	*scattered = RAY1f(hit_record->p, ADD(reflected, ll_vec3_mul1f(random_unit_vector(), metal.fuzz)), ray.time);
+	*scattered = RAY1f(hit_record->p, ADD(reflected, ll_vec3_mul1f(random_unit_vector(), metal.fuzz)),
+			   ray.time);
 	*attenuation = metal.albedo;
 	return true;
 }
@@ -740,6 +982,38 @@ defocus_disk_sample(void)
 {
 	vec3_t p = random_in_unit_disk();
 	return ADD(camera.center, ADD(ll_vec3_mul1f(camera.defocus_disk_u, p.x), ll_vec3_mul1f(camera.defocus_disk_v, p.y)));
+}
+
+static aabb_t
+aabb_empty(void)
+{
+	return (aabb_t) { empty, empty, empty };
+}
+
+static aabb_t
+aabb2v(point_t a, point_t b)
+{
+	return (aabb_t) {
+		.x = INTERVAL2f(fmin(a.x, b.x), fmax(a.x, b.x)),
+		.y = INTERVAL2f(fmin(a.y, b.y), fmax(a.y, b.y)),
+		.z = INTERVAL2f(fmin(a.z, b.z), fmax(a.z, b.z)),
+	};
+}
+
+static aabb_t
+aabb3i(interval_t x, interval_t y, interval_t z)
+{
+	return (aabb_t) { x, y, z };
+}
+
+static aabb_t
+aabb2bbox(aabb_t a, aabb_t b)
+{
+	return (aabb_t) {
+		INTERVAL2v(a.x, b.x),
+		INTERVAL2v(a.y, b.y),
+		INTERVAL2v(a.z, b.z)
+	};
 }
 
 static interval_t
