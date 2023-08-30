@@ -198,11 +198,20 @@ typedef struct image_t {
 	SDL_Surface *surface;
 } image_t;
 
+typedef struct noise_t {
+	int point_count;
+	float *ranfloat;
+	int *perm_x;
+	int *perm_y;
+	int *perm_z;
+} noise_t;
+
 typedef struct texture_t {
 	enum {
 		TEXTURE_SOLID_COLOUR,
 		TEXTURE_CHECKERED,
 		TEXTURE_IMAGE,
+		TEXTURE_NOISE,
 		TEXTURE_COUNT,
 	} type;
 
@@ -210,6 +219,7 @@ typedef struct texture_t {
 		struct solid_colour_t solid_colour;
 		struct checkered_t checkered;
 		struct image_t image;
+		struct noise_t noise;
 	} surface;
 
 	colour_t (*value)(struct texture_t *texture, float u, float v, point_t p);
@@ -235,6 +245,12 @@ image_create(const char *pathname);
 
 static colour_t
 image_value(texture_t *texture, float u, float v, point_t p);
+
+static texture_t *
+noise_create(void);
+
+static colour_t
+noise_value(texture_t *texture, float u, float v, point_t p);
 
 typedef struct hit_record_t hit_record_t;
 
@@ -610,13 +626,38 @@ earth(void)
 	camera_render(&world);
 }
 
+static void
+two_perlin_spheres(void)
+{
+	texture_t *perlin = noise_create();
+	material_t *material = lambertian_create(perlin);
+
+	hit_list_push_back(&world, sphere_create(POINT(0, -1000, 0), 1000.0, material));
+	hit_list_push_back(&world, sphere_create(POINT(0, 2, 0), 2.0, material));
+	
+	camera.image_width = IMAGE_WIDTH;
+	camera.aspect_ratio = ASPECT_RATIO;
+	camera.samples_per_pixel = 50;
+	camera.max_depth = 50;
+	
+	camera.vfov = 20;
+	camera.lookfrom = VEC3(13, 2, 3);
+	camera.lookat = VEC3(0, 0, 0);
+	camera.vup = VEC3(0, 1, 0);
+	
+	camera.defocus_angle = 0.0;
+	camera.focus_dist = 10.0;
+	
+	camera_render(&world);
+}
+
 int
 main(int argc, char **argv)
 {
 	srand(5);
 	SDL_Init(SDL_INIT_VIDEO);
 	IMG_Init(IMG_INIT_PNG | IMG_INIT_JPG);
-	switch (3) {
+	switch (4) {
 	case 1:
 		random_spheres();
 		break;
@@ -625,6 +666,9 @@ main(int argc, char **argv)
 		break;
 	case 3:
 		earth();
+		break;
+	case 4:
+		two_perlin_spheres();
 		break;
 	}
 	SDL_Quit();
@@ -1312,17 +1356,100 @@ image_value(texture_t *texture, float u, float v, point_t p)
 	int pitch = texture->surface.image.surface->pitch;
 
 	Uint8 *pixel = (Uint8 *) pixels + j * pitch + i * BytesPerPixel;
-	Uint32 PixelData = *(Uint32 *) pixel;
+	Uint32 pixel_data = *(Uint32 *) pixel;
 
 	float colour_scale = 1.0 / 255.0;
 	colour_t colour;
 
 	Uint8 r, g, b;
 
-	SDL_GetRGB(PixelData, format, &r, &g, &b);
+	SDL_GetRGB(pixel_data, format, &r, &g, &b);
 	
 	colour = COLOUR(r * colour_scale, g * colour_scale, b * colour_scale);
 	return colour;
+}
+
+static float
+noise(texture_t *texture, point_t p)
+{
+	assert(texture->type == TEXTURE_NOISE);
+	int i = (int) (4 * p.x);
+	int j = (int) (4 * p.y);
+	int k = (int) (4 * p.z);
+
+	i &= 0x000000ff;
+	j &= 0x000000ff;
+	k &= 0x000000ff;
+
+	noise_t noise = texture->surface.noise;
+	return noise.ranfloat[noise.perm_x[i] ^ noise.perm_y[j] ^ noise.perm_z[k]];
+}
+
+static void
+permute(int *p, int n)
+{
+	int i;
+	for (i = n - 1; i > 0; i--) {
+		int target = random_int2i(0 ,i);
+		int tmp = p[i];
+		p[i] = p[target];
+		p[target] = tmp;
+	}
+}
+
+static int *
+perlin_generate_perm(int point_count)
+{
+	int i;
+	int *p = calloc(point_count, sizeof(*p));
+	if (!p) {
+		fprintf(stderr, "Failed to allocate points!\n");
+		exit(EXIT_FAILURE);
+	}
+	for (i = 0; i < point_count; i++) {
+		p[i] = i;
+	}
+
+	permute(p, point_count);
+	return p;
+}
+
+static texture_t *
+noise_create(void)
+{
+	int i;
+	texture_t *texture;
+	texture = malloc(sizeof(*texture));
+	if (!texture) {
+		fprintf(stderr, "Failed to create image texture!\n");
+		exit(EXIT_FAILURE);
+	}
+
+	int point_count = 256;
+	float *ranfloat = malloc(sizeof(*ranfloat) * point_count);
+	if (!ranfloat) {
+		fprintf(stderr, "Failed to allocate points!\n");
+		exit(EXIT_FAILURE);
+	}
+	for (i = 0; i < point_count; i++) {
+		ranfloat[i] = random_float();
+	}
+	
+	int *perm_x = perlin_generate_perm(point_count);
+	int *perm_y = perlin_generate_perm(point_count);
+	int *perm_z = perlin_generate_perm(point_count);
+
+	texture->type = TEXTURE_NOISE;
+	texture->surface.noise = (noise_t) { point_count, ranfloat, perm_x, perm_y, perm_z };
+	texture->value = noise_value;
+	return texture;
+}
+
+static colour_t
+noise_value(texture_t *texture, float u, float v, point_t p)
+{
+	assert(texture->type == TEXTURE_NOISE);
+	return ll_vec3_mul1f(COLOUR(1, 1, 1), noise(texture, p));
 }
 
 
