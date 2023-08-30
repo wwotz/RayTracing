@@ -565,11 +565,7 @@ static void
 two_spheres(void)
 {
 	texture_t *checkered = checkered_create2v(0.8, COLOUR(.2, .3, .1), COLOUR(.9, .9, .9));
-	texture_t *earth = image_create("earthmap.jpg");
-	printf("%dx%d\n", earth->surface.image.surface->w, earth->surface.image.surface->h);
-	printf("format: %d\n", earth->surface.image.surface->format->BytesPerPixel);
-	printf("pitch: %d\n", earth->surface.image.surface->pitch);
-	material_t *material = lambertian_create(earth);
+	material_t *material = lambertian_create(checkered);
 
 	hit_list_push_back(&world, sphere_create(POINT(0, -10, 0), 10.0, material));
 	hit_list_push_back(&world, sphere_create(POINT(0, 10, 0), 10.0, material));
@@ -590,17 +586,45 @@ two_spheres(void)
 	camera_render(&world);
 }
 
+static void
+earth(void)
+{
+	texture_t *earth = earth = image_create("earthmap.jpg");
+	material_t *material = lambertian_create(earth);
+
+	hit_list_push_back(&world, sphere_create(POINT(0, 0, 0), 2.0, material));
+	
+	camera.image_width = IMAGE_WIDTH;
+	camera.aspect_ratio = ASPECT_RATIO;
+	camera.samples_per_pixel = 500;
+	camera.max_depth = 50;
+	
+	camera.vfov = 20;
+	camera.lookfrom = VEC3(0, 0, 12);
+	camera.lookat = VEC3(0, 0, 0);
+	camera.vup = VEC3(0, 1, 0);
+	
+	camera.defocus_angle = 0.0;
+	camera.focus_dist = 10.0;
+	
+	camera_render(&world);
+}
+
 int
 main(int argc, char **argv)
 {
+	srand(5);
 	SDL_Init(SDL_INIT_VIDEO);
 	IMG_Init(IMG_INIT_PNG | IMG_INIT_JPG);
-	switch (2) {
+	switch (3) {
 	case 1:
 		random_spheres();
 		break;
 	case 2:
 		two_spheres();
+		break;
+	case 3:
+		earth();
 		break;
 	}
 	SDL_Quit();
